@@ -1,5 +1,7 @@
 import { applyRemoteSessionEvent, createRemoteSessionState, establishRemoteSnapshotBaseline, RemoteStateError } from "./remote-session-state.js";
 import { createRemoteSessionStream } from "./remote-session-stream.js";
+import { controlSessionExpiry, createCloudRequestError, createRenewalState, isMutationOperation, transitionRenewal } from "./control-session-renewal.js";
+import { createBrowserNotificationController, notificationForDeviceTransition, notificationForRemoteEvent, notificationForStreamTransition } from "./remote-notifications.js";
 
 const DISABLED_GATES = Object.freeze({
   enrollment: false,
@@ -42,6 +44,7 @@ const state = {
   cloud: { ready: false, cors: false, wssRoute: false },
   refreshTimer: null,
   controlSession: null,
+  controlRenewal: createRenewalState(),
   workspaces: [],
   sessions: [],
   selectedWorkspaceId: null,
@@ -54,6 +57,7 @@ const state = {
   remoteModel: null,
   remoteStream: null,
   remoteStreamState: "CLOSED",
+  remoteConnectionEpoch: 0,
   remoteEventBuffer: [],
   remoteRecovery: null,
 };
@@ -64,6 +68,12 @@ const logElement = element("log");
 const gateList = element("gateList");
 const deviceList = element("deviceList");
 const readiness = element("readiness");
+const notifications = createBrowserNotificationController({
+  focus() {
+    window.focus();
+    element("remoteBrowser")?.scrollIntoView({ block: "start", behavior: "smooth" });
+  },
+});
 
 export function normalizeBaseUrl(value) {
   const url = new URL(String(value || "").trim());
@@ -137,10 +147,7 @@ async function request(path, options = {}) {
   try { payload = text ? JSON.parse(text) : null; } catch { payload = text; }
   log(response.ok ? "success" : "error", `${method} ${path} → ${response.status} (${Math.round(performance.now() - started)}ms)`, response.ok ? undefined : payload);
   if (!response.ok) {
-    const error = new Error(payload?.message || `HTTP ${response.status}`);
-    error.status = response.status;
-    error.code = payload?.error || "request_failed";
-    throw error;
+    throw createCloudRequestError(payload, response.status);
   }
   return payload;
 }
@@ -285,9 +292,18 @@ async function loadPolicy() {
 async function loadDevices() {
   if (!state.token || !state.activeOrgId) return;
   element("refreshDevicesButton").disabled = true;
+  const previousDevices = new Map(state.devices.map((device) => [device.id, device]));
+  const activeDeviceId = state.selectedSessionId ? state.selectedDeviceId : null;
   try {
     const payload = await request("/v1/desktop-devices");
     state.devices = Array.isArray(payload?.items) ? payload.items : [];
+    if (activeDeviceId) {
+      notifications.notify(notificationForDeviceTransition(
+        previousDevices.get(activeDeviceId),
+        state.devices.find((device) => device.id === activeDeviceId),
+        { active: state.selectedDeviceId === activeDeviceId && Boolean(state.selectedSessionId) },
+      ));
+    }
     if (!state.selectedDeviceId || !state.devices.some((device) => device.id === state.selectedDeviceId)) {
       state.selectedDeviceId = state.devices.find((device) => device.presence === "online")?.id || state.devices[0]?.id || null;
     }
@@ -392,6 +408,7 @@ function resetRemoteBrowser() {
   state.remoteStream?.stop("CLOSED");
   state.remoteStream = null;
   state.controlSession = null;
+  state.controlRenewal = createRenewalState();
   state.workspaces = [];
   state.sessions = [];
   state.selectedWorkspaceId = null;
@@ -401,6 +418,7 @@ function resetRemoteBrowser() {
   state.remoteEventBuffer = [];
   state.remoteRecovery = null;
   state.remoteStreamState = "CLOSED";
+  state.remoteConnectionEpoch = 0;
   state.controlBusy = false;
   if (prior?.id && state.token) void request(`/v1/desktop-control-sessions/${encodeURIComponent(prior.id)}`, { method: "DELETE" }).catch(() => undefined);
   renderRemoteBrowser();
@@ -441,6 +459,14 @@ async function executeRemoteCommand(controlSession, operation, argumentsValue, g
   return { commandId: created.commandId, result: terminal.result.result };
 }
 
+function applyRenewalEvent(event) {
+  const result = transitionRenewal(state.controlRenewal, event);
+  state.controlRenewal = result.state;
+  renderRemoteBrowser();
+  renderInteractions();
+  return result;
+}
+
 async function runRemoteOperation(operation, argumentsValue, scope, { selected = false, withCommand = false } = {}) {
   if (state.controlBusy) throw new Error("已有远程读取正在进行");
   const device = selectedDevice();
@@ -449,12 +475,23 @@ async function runRemoteOperation(operation, argumentsValue, scope, { selected =
   state.controlBusy = true;
   const generation = state.controlGeneration;
   let disposable = null;
+  if (selected && isMutationOperation(operation)) applyRenewalEvent({ type: "command_started", operation });
   renderRemoteBrowser();
   try {
     const session = selected ? state.controlSession : (disposable = await openControlSession(scope));
     if (!session || generation !== state.controlGeneration) throw new Error("操作已取消");
     const completed = await executeRemoteCommand(session, operation, argumentsValue, generation);
     return withCommand ? completed : completed.result;
+  } catch (error) {
+    if (selected && isMutationOperation(operation)) {
+      const decision = applyRenewalEvent({ type: "command_failed", operation, errorCode: error?.code });
+      if (decision.effects.includes("offer_renewal")) {
+        log("info", "Cloud 要求在再次执行写操作前续期 control session", { operation });
+      } else if (decision.effects.includes("recreate_session")) {
+        window.setTimeout(() => void recreateSelectedControlSession(state.controlGeneration), 0);
+      }
+    }
+    throw error;
   } finally {
     if (disposable?.id) void request(`/v1/desktop-control-sessions/${encodeURIComponent(disposable.id)}`, { method: "DELETE" }).catch(() => undefined);
     if (generation === state.controlGeneration) state.controlBusy = false;
@@ -525,6 +562,7 @@ async function selectRemoteSession(sessionId) {
       return;
     }
     state.controlSession = controlSession;
+    state.controlRenewal = createRenewalState();
     state.remoteModel = createRemoteSessionState({ controlSessionId: controlSession.id, deviceId: controlSession.deviceId, workspaceId, sessionId });
     startSelectedStream(generation);
     const completed = await runRemoteOperation("session.snapshot", { workspaceId, sessionId }, { workspaceId, sessionId }, { selected: true, withCommand: true });
@@ -568,12 +606,56 @@ function closeSelectedControlSession() {
   state.remoteStream = null;
   const prior = state.controlSession;
   state.controlSession = null;
+  state.controlRenewal = createRenewalState();
   state.remoteModel = null;
   state.remoteEventBuffer = [];
   state.remoteRecovery = null;
   state.remoteStreamState = "CLOSED";
+  state.remoteConnectionEpoch = 0;
   state.activeRunId = null;
   if (prior?.id && state.token) void request(`/v1/desktop-control-sessions/${encodeURIComponent(prior.id)}`, { method: "DELETE" }).catch(() => undefined);
+}
+
+async function renewSelectedControlSession() {
+  const controlSession = state.controlSession;
+  if (!controlSession || state.controlBusy) return;
+  const generation = state.controlGeneration;
+  if (controlSessionExpiry(controlSession).state === "expired") {
+    applyRenewalEvent({ type: "renew_failed", errorCode: "control_session_expired" });
+    toast("Control session 已过期，正在创建新 session 并读取快照");
+    await recreateSelectedControlSession(generation);
+    return;
+  }
+  const requested = applyRenewalEvent({ type: "renew_requested" });
+  if (!requested.effects.includes("renew_session")) return;
+  try {
+    const renewed = await request(`/v1/desktop-control-sessions/${encodeURIComponent(controlSession.id)}/renew`, {
+      method: "POST",
+      body: { schemaVersion: 1 },
+    });
+    if (generation !== state.controlGeneration || state.controlSession?.id !== controlSession.id) return;
+    if (renewed?.id !== controlSession.id || renewed.deviceId !== controlSession.deviceId || renewed.status !== "active") {
+      throw new Error("Control session 续期响应无效");
+    }
+    state.controlSession = renewed;
+    const result = applyRenewalEvent({ type: "renew_succeeded" });
+    log("success", "Control session 已续期", {
+      authenticatedAt: renewed.authenticatedAt,
+      lastActiveAt: renewed.lastActiveAt,
+      expiresAt: renewed.expiresAt,
+    });
+    toast(result.effects.includes("tell_user_to_retry") ? "身份证明已续期，请重试刚才的操作" : "Control session 已续期");
+  } catch (error) {
+    if (generation !== state.controlGeneration) return;
+    const result = applyRenewalEvent({ type: "renew_failed", errorCode: error?.code });
+    if (result.effects.includes("recreate_session")) {
+      toast("原 control session 已关闭，正在创建新 session 并读取快照");
+      await recreateSelectedControlSession(generation);
+      return;
+    }
+    log("error", "Control session 续期失败", { message: error instanceof Error ? error.message : "unknown" });
+    toast(error instanceof Error ? error.message : "Control session 续期失败");
+  }
 }
 
 function streamHeaders() {
@@ -590,7 +672,15 @@ function startSelectedStream(generation) {
     headers: streamHeaders,
     onState(value, detail) {
       if (generation !== state.controlGeneration) return;
+      const previous = state.remoteStreamState;
       state.remoteStreamState = value;
+      if (value === "LIVE" && previous !== "LIVE") state.remoteConnectionEpoch += 1;
+      notifications.notify(notificationForStreamTransition(previous, value, {
+        active: Boolean(state.controlSession),
+        closed: detail?.closed === true,
+        controlSessionId: state.controlSession?.id,
+        transitionId: state.remoteConnectionEpoch,
+      }));
       if (detail) log(value === "ERROR" ? "error" : "info", `SSE ${value}`, { message: detail.message });
       renderRemoteBrowser();
     },
@@ -619,10 +709,12 @@ function startSelectedStream(generation) {
 async function applySelectedEnvelope(envelope, sseId, generation) {
   if (generation !== state.controlGeneration) return;
   try {
-    const result = applyRemoteSessionEvent(state.remoteModel, envelope, sseId);
+    const previousModel = state.remoteModel;
+    const result = applyRemoteSessionEvent(previousModel, envelope, sseId);
     state.remoteModel = result.state;
     state.snapshot = result.state.snapshot;
     state.activeRunId = result.state.activeRun?.runId || null;
+    notifications.notify(notificationForRemoteEvent(previousModel, result.state, envelope, result.effects));
     applyRenderEffects(result.effects);
     if (result.effects.some((effect) => effect.type === "resync")) void requestSelectedRecovery("event_requested", generation);
   } catch (error) {
@@ -711,7 +803,9 @@ async function abortRemoteRun() {
 
 function renderRemoteBrowser() {
   const operations = advertisedOperations();
-  const unsafe = state.controlBusy || ["RESYNCING", "CLOSED", "ERROR"].includes(state.remoteStreamState);
+  const expiry = controlSessionExpiry(state.controlSession);
+  const renewalBlocksMutation = ["renew_required", "renewing", "renew_failed", "recreating"].includes(state.controlRenewal.phase) || expiry.state === "expired";
+  const unsafe = state.controlBusy || renewalBlocksMutation || ["RESYNCING", "CLOSED", "ERROR"].includes(state.remoteStreamState);
   const buttonElements = [...document.querySelectorAll("[data-operation]")];
   for (const button of buttonElements) {
     const operation = button.dataset.operation;
@@ -733,6 +827,7 @@ function renderRemoteBrowser() {
   element("sessionCount").textContent = String(state.sessions.length);
   element("snapshotStatus").textContent = state.remoteStreamState;
   element("snapshotStatus").className = `stream-state ${state.remoteStreamState.toLowerCase()}`;
+  renderControlSessionStatus(expiry);
 
   const workspaces = element("workspaceList");
   workspaces.innerHTML = "";
@@ -759,6 +854,59 @@ function renderRemoteBrowser() {
     button.addEventListener("click", () => void selectRemoteSession(session.id));
     sessions.append(button);
   }
+}
+
+function formatRemaining(remainingMs) {
+  if (!Number.isFinite(remainingMs)) return "unknown expiry";
+  const seconds = Math.max(0, Math.ceil(remainingMs / 1000));
+  if (seconds < 60) return `${seconds}s remaining`;
+  return `${Math.ceil(seconds / 60)}m remaining`;
+}
+
+function renderControlSessionStatus(expiry = controlSessionExpiry(state.controlSession)) {
+  const root = element("controlSessionStatus");
+  const button = element("renewControlSessionButton");
+  if (!root || !button) return;
+  if (!state.controlSession) {
+    root.classList.add("hidden");
+    return;
+  }
+  root.classList.remove("hidden", "warning", "danger", "success");
+  const phase = state.controlRenewal.phase;
+  let title = "Control session active";
+  let detail = `${formatRemaining(expiry.remainingMs)} · current login bearer is the reauthentication proof`;
+  let showButton = expiry.state === "approaching";
+  if (phase === "renew_required") {
+    title = "Reauthentication required";
+    detail = "Renew once with the current login, then explicitly retry the blocked operation.";
+    root.classList.add("warning");
+    showButton = true;
+  } else if (phase === "renewing") {
+    title = "Renewing control session";
+    detail = "The blocked mutation will not be replayed.";
+    root.classList.add("warning");
+    showButton = true;
+  } else if (phase === "retry_required") {
+    title = "Reauthenticated";
+    detail = "Renewal succeeded. Retry the prior operation when ready; it was not replayed.";
+    root.classList.add("success");
+  } else if (phase === "renew_failed") {
+    title = "Renewal failed";
+    detail = "No mutation was replayed. Recreate the selected control session if needed.";
+    root.classList.add("danger");
+  } else if (phase === "recreating" || expiry.state === "expired") {
+    title = "Control session expired";
+    detail = "Creating a new scoped session and loading a fresh snapshot.";
+    root.classList.add("danger");
+  } else if (expiry.state === "approaching") {
+    title = "Control session expires soon";
+    root.classList.add("warning");
+  }
+  element("controlSessionStatusTitle").textContent = title;
+  element("controlSessionStatusDetail").textContent = detail;
+  button.classList.toggle("hidden", !showButton);
+  button.disabled = state.controlBusy || phase === "renewing" || phase === "recreating" || expiry.state === "expired";
+  button.textContent = phase === "renewing" ? "Renewing…" : "Renew session";
 }
 
 function renderSnapshot() {
@@ -859,7 +1007,7 @@ function renderInteractions() {
         const button = document.createElement("button");
         button.type = "button";
         button.textContent = response === "allow_once" ? "Allow once" : "Reject";
-        button.disabled = state.remoteStreamState !== "LIVE";
+        button.disabled = state.remoteStreamState !== "LIVE" || ["renew_required", "renewing", "renew_failed", "recreating"].includes(state.controlRenewal.phase);
         button.addEventListener("click", () => void replyToInteraction(item, response));
         row.append(button);
       }
@@ -867,7 +1015,7 @@ function renderInteractions() {
       const button = document.createElement("button");
       button.type = "button";
       button.textContent = "Answer";
-      button.disabled = state.remoteStreamState !== "LIVE";
+      button.disabled = state.remoteStreamState !== "LIVE" || ["renew_required", "renewing", "renew_failed", "recreating"].includes(state.controlRenewal.phase);
       button.addEventListener("click", () => void replyToQuestion(item));
       row.append(button);
     }
@@ -947,6 +1095,19 @@ function renderReadiness() {
   renderRemoteBrowser();
 }
 
+function renderNotificationPermission() {
+  const button = element("notificationButton");
+  const permission = notifications.permission();
+  const labels = {
+    default: "启用安全通知",
+    granted: "通知已启用",
+    denied: "通知已拒绝",
+    unsupported: "浏览器不支持通知",
+  };
+  button.textContent = labels[permission] || labels.unsupported;
+  button.disabled = permission !== "default";
+}
+
 function logout() {
   resetRemoteBrowser();
   state.token = null;
@@ -1010,6 +1171,10 @@ function wireEvents() {
     await navigator.clipboard.writeText(report());
     toast("诊断报告已复制");
   });
+  element("notificationButton").addEventListener("click", async () => {
+    await notifications.requestPermission();
+    renderNotificationPermission();
+  });
   document.querySelector('[data-operation="workspace.list"]').addEventListener("click", () => void loadRemoteWorkspaces());
   document.querySelector('[data-operation="session.list"]').addEventListener("click", () => state.selectedWorkspaceId && void selectRemoteWorkspace(state.selectedWorkspaceId));
   document.querySelector('[data-operation="session.snapshot"]').addEventListener("click", () => state.selectedSessionId && void selectRemoteSession(state.selectedSessionId));
@@ -1024,6 +1189,7 @@ function wireEvents() {
     element("promptInput").value = "";
   });
   element("sendPromptButton").addEventListener("click", () => void sendRemotePrompt());
+  element("renewControlSessionButton").addEventListener("click", () => void renewSelectedControlSession());
   for (const button of document.querySelectorAll("[data-login-mode]")) {
     button.addEventListener("click", () => {
       state.loginMode = button.dataset.loginMode;
@@ -1033,12 +1199,14 @@ function wireEvents() {
     });
   }
   window.setInterval(() => {
-    if (state.token && element("autoRefresh").checked && !document.hidden) void loadDevices();
+    if (state.token && element("autoRefresh").checked && (!document.hidden || state.selectedSessionId)) void loadDevices();
+    if (state.controlSession) renderRemoteBrowser();
   }, 10_000);
 }
 
 renderPolicy();
 renderReadiness();
+renderNotificationPermission();
 wireEvents();
 log("info", "诊断台已启动；敏感凭证不会写入浏览器存储");
 void checkCloud();

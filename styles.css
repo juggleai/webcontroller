@@ -43,6 +43,7 @@ h1 span { color: #9ba7b5; }
 .notice-icon { display: grid; place-items: center; flex: 0 0 24px; width: 24px; height: 24px; border: 1px solid var(--warn); color: var(--warn); border-radius: 50%; font-weight: 800; }
 .notice strong { font-size: 13px; }
 .notice p { margin: 5px 0 0; color: #c5b99d; font-size: 13px; line-height: 1.5; }
+.notification-button { flex: 0 0 auto; margin-left: auto; }
 
 .grid { display: grid; gap: 18px; margin-bottom: 18px; }
 .top-grid { grid-template-columns: .95fr 1.05fr; }
@@ -135,6 +136,16 @@ button:not(:disabled):active { transform: translateY(1px); }
 .command-buttons button { font: 600 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .command-buttons button.prompt-btn:not(:disabled) { border-color: rgba(168,240,122,.3); }
 .command-buttons button.abort-btn:not(:disabled) { border-color: rgba(255,124,130,.3); color: var(--danger); }
+.control-session-status { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 16px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 11px; background: rgba(98,212,255,.045); }
+.control-session-status strong, .control-session-status span { display: block; }
+.control-session-status strong { color: var(--cyan); font-size: 11px; }
+.control-session-status span { color: var(--muted); font-size: 10px; margin-top: 4px; line-height: 1.45; }
+.control-session-status.warning { border-color: rgba(255,200,107,.25); background: rgba(255,200,107,.06); }
+.control-session-status.warning strong { color: var(--warn); }
+.control-session-status.danger { border-color: rgba(255,124,130,.25); background: rgba(255,124,130,.06); }
+.control-session-status.danger strong { color: var(--danger); }
+.control-session-status.success { border-color: rgba(168,240,122,.25); background: var(--accent-dim); }
+.control-session-status.success strong { color: var(--accent); }
 .prompt-panel { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
 .prompt-panel textarea { width: 100%; background: rgba(4,7,11,.55); border: 1px solid var(--line); border-radius: 11px; padding: 12px; color: var(--text); resize: vertical; outline: none; font: inherit; }
 .prompt-panel textarea:focus { border-color: rgba(168,240,122,.5); box-shadow: 0 0 0 3px rgba(168,240,122,.08); }
@@ -200,9 +211,13 @@ button:not(:disabled):active { transform: translateY(1px); }
   .remote-browser { grid-template-columns: 1fr; }
   .transcript-pane { grid-column: auto; }
   .command-panel { align-items: flex-start; flex-direction: column; }
+  .control-session-status { align-items: flex-start; flex-direction: column; }
+  .control-session-status button { width: 100%; }
   .card-heading { align-items: flex-start; }
   .devices-card .card-heading { flex-direction: column; }
   .metrics { grid-template-columns: 1fr; gap: 10px; }
   .metrics div { border-right: 0; border-bottom: 1px solid var(--line); padding: 0 0 10px; }
   .log-entry { grid-template-columns: 62px 48px 1fr; }
+  .notice { flex-wrap: wrap; }
+  .notification-button { width: calc(100% - 40px); margin-left: 40px; }
 }

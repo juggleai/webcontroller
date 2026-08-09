@@ -4,8 +4,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
-const host = process.env.CONTROLWEB_HOST?.trim() || "127.0.0.1";
-const requestedPort = Number(process.env.CONTROLWEB_PORT || 4177);
+const host = process.env.WEBCONTROLLER_HOST?.trim() || "127.0.0.1";
+const requestedPort = Number(process.env.WEBCONTROLLER_PORT || 4177);
 const port = Number.isSafeInteger(requestedPort) && requestedPort >= 0 && requestedPort <= 65535
   ? requestedPort
   : 4177;
@@ -17,10 +17,12 @@ const files = new Map([
   ["/sse.js", ["sse.js", "text/javascript; charset=utf-8"]],
   ["/remote-session-state.js", ["remote-session-state.js", "text/javascript; charset=utf-8"]],
   ["/remote-session-stream.js", ["remote-session-stream.js", "text/javascript; charset=utf-8"]],
+  ["/control-session-renewal.js", ["control-session-renewal.js", "text/javascript; charset=utf-8"]],
+  ["/remote-notifications.js", ["remote-notifications.js", "text/javascript; charset=utf-8"]],
   ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
 ]);
 
-export function createControlWebServer() {
+export function createWebControllerServer() {
   return createServer(async (request, response) => {
     const pathname = new URL(request.url || "/", "http://localhost").pathname;
     if (pathname === "/health") {
@@ -66,10 +68,10 @@ export function createControlWebServer() {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const server = createControlWebServer();
+  const server = createWebControllerServer();
   server.listen(port, host, () => {
     const address = server.address();
     const actualPort = typeof address === "object" && address ? address.port : port;
-    console.log(`JuggleWork Desktop control diagnostics: http://${host}:${actualPort}`);
+    console.log(`JuggleWork webcontroller diagnostics: http://${host}:${actualPort}`);
   });
 }

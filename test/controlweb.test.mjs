@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { createControlWebServer } from "../server.mjs";
+import { createWebControllerServer } from "../server.mjs";
 
 test("serves the diagnostic page with restrictive browser headers", async (context) => {
-  const server = createControlWebServer();
+  const server = createWebControllerServer();
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   context.after(() => server.close());
   const address = server.address();
@@ -16,7 +16,7 @@ test("serves the diagnostic page with restrictive browser headers", async (conte
 });
 
 test("exposes a local health endpoint and rejects unknown files", async (context) => {
-  const server = createControlWebServer();
+  const server = createWebControllerServer();
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   context.after(() => server.close());
   const address = server.address();
@@ -26,11 +26,11 @@ test("exposes a local health endpoint and rejects unknown files", async (context
 });
 
 test("serves the DOM-free remote control modules", async (context) => {
-  const server = createControlWebServer();
+  const server = createWebControllerServer();
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   context.after(() => server.close());
   const address = server.address();
-  for (const asset of ["sse.js", "remote-session-state.js", "remote-session-stream.js"]) {
+  for (const asset of ["sse.js", "remote-session-state.js", "remote-session-stream.js", "control-session-renewal.js", "remote-notifications.js"]) {
     const response = await fetch(`http://127.0.0.1:${address.port}/${asset}`);
     assert.equal(response.status, 200);
     assert.match(response.headers.get("content-type"), /javascript/);

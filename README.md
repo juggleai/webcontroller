@@ -1,49 +1,74 @@
-# JuggleWork Desktop 远程控制诊断台
+# JuggleWork Webcontroller
 
-本机运行的零依赖 Web 页面，用于验证：
+A zero-dependency, locally hosted web console for diagnosing and validating the
+JuggleWork remote-control path. It can be used to verify:
 
-- `https://work.juggle.im` 可访问性与 CORS；
-- Cloud 账号登录和组织选择；
-- Desktop remote-control feature gates；
-- 已注册 Desktop 的在线、离线、心跳 generation 和能力广告；
-- 通过稳定的 scoped control session、持久化 command 和可恢复 SSE 读取并增量更新会话；
-- 当前端到端控制链路还缺少哪些增强环节。
+- Connectivity to `https://work.juggle.im` and CORS behavior;
+- Cloud account sign-in and organization selection;
+- Desktop remote-control feature gates;
+- Online and offline presence, heartbeat generations, and capability
+  advertisements for registered Desktop devices;
+- Incremental session updates through stable, scoped control sessions,
+  durable commands, and resumable SSE streams;
+- Remaining gaps and hardening opportunities in the end-to-end control path.
 
-## 运行
+## Getting started
 
 ```bash
-cd controlweb
+cd webcontroller
 npm start
 ```
 
-浏览器打开：
+Then open the following URL in a browser:
 
 ```text
 http://127.0.0.1:4177
 ```
 
-也可以使用环境变量更改监听端口：
+To use a different port, set `WEBCONTROLLER_PORT` before starting the server:
 
 ```bash
-CONTROLWEB_PORT=4180 npm start
+WEBCONTROLLER_PORT=4180 npm start
 ```
 
-## 安全说明
+## Security considerations
 
-- 密码只用于登录请求，不保存。
-- Cloud session token 只保存在页面 JavaScript 内存中。
-- 页面刷新或关闭会清除 token。
-- 页面不使用 `localStorage` 或 `sessionStorage` 保存凭证。
-- “复制报告”会排除 session token 和密码。
+- Passwords are used only for the sign-in request and are never stored.
+- The Cloud session token is kept only in the page's JavaScript memory.
+- Control-session renewal reuses the current authenticated bearer as proof. It
+  does not store the password or ask for it again.
+- Refreshing or closing the page clears the token.
+- Credentials are never stored in `localStorage` or `sessionStorage`.
+- **Copy report** omits session tokens and passwords.
+- Browser notifications are sent only after the user clicks **Enable secure
+  notifications** and grants explicit permission. Titles and bodies use fixed,
+  semantic text and do not include prompts, transcripts, paths, payloads,
+  errors, or identifiers.
 
-## 当前能力与限制
+## Current capabilities and limitations
 
-当前 Server 和 Desktop 已实现：
+The current Server and Desktop implementations provide:
 
-- 设备注册、PoP 认证、出站 WSS、presence、心跳和能力发布；
-- discovery/workspace/session 三层只读 control session；
-- durable command、generation-fenced WSS delivery、可恢复 SSE 和有界 polling fallback；
-- Desktop `workspace.list`、`session.list`、`session.snapshot` handlers；
-- 有界、内容最小化的会话快照。
+- Device registration, proof-of-possession (PoP) authentication, outbound WSS,
+  presence, heartbeats, and capability publication;
+- Read-only control sessions across the discovery, workspace, and session
+  layers;
+- Durable commands, generation-fenced WSS delivery, resumable SSE, and bounded
+  polling fallback;
+- Desktop handlers for `workspace.list`, `session.list`, and
+  `session.snapshot`;
+- Bounded session snapshots with minimized content.
 
-当前页面可以读取本机工作区、会话和快照，并应用规范化 transcript/todo/interaction/status 增量事件。设备广告并由策略启用时也支持 `session.prompt` 和 guarded `session.abort`；历史 transcript 分页仍未实现。
+The webcontroller can read the local workspace, sessions, and snapshots, and
+apply normalized incremental `transcript`, `todo`, `interaction`, and `status`
+events. When the device advertises the capability and policy allows it, the
+console also supports `session.prompt` and guarded `session.abort` operations.
+It can surface secure notifications for interaction waits, terminal run states,
+closed or disconnected control connections, and revoked or unavailable
+devices.
+
+Control sessions can be explicitly renewed before they expire. If a write
+operation returns `control_session_reauthentication_required`, the console
+renews the session and asks the user to retry; it never replays the operation
+automatically. Expired or closed sessions are rebuilt from a fresh snapshot.
+Historical transcript pagination is not implemented yet.

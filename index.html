@@ -32,6 +32,7 @@
           <strong>当前测试范围</strong>
           <p>选定会话使用一个短期 scoped control session，通过持久化 command、可恢复 SSE 增量事件和有界轮询兜底保持同步。重同步期间保留 transcript 并暂停不安全操作。</p>
         </div>
+        <button class="ghost notification-button" id="notificationButton" type="button">启用安全通知</button>
       </section>
 
       <div class="grid top-grid">
@@ -148,6 +149,13 @@
             <button type="button" disabled data-operation="session.prompt" class="prompt-btn">session.prompt</button>
             <button type="button" disabled data-operation="session.abort" class="abort-btn">session.abort</button>
           </div>
+        </div>
+        <div class="control-session-status hidden" id="controlSessionStatus" role="status">
+          <div>
+            <strong id="controlSessionStatusTitle">Control session active</strong>
+            <span id="controlSessionStatusDetail"></span>
+          </div>
+          <button class="ghost hidden" id="renewControlSessionButton" type="button">Renew session</button>
         </div>
         <div class="prompt-panel hidden" id="promptPanel">
           <label>
