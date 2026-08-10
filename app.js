@@ -3,6 +3,14 @@ import { createRemoteSessionStream } from "./remote-session-stream.js";
 import { controlSessionExpiry, createCloudRequestError, createRenewalState, isMutationOperation, transitionRenewal } from "./control-session-renewal.js";
 import { createBrowserNotificationController, notificationForDeviceTransition, notificationForRemoteEvent, notificationForStreamTransition } from "./remote-notifications.js";
 import { canCreateSession, normalizeSessionTitle, SessionCreationMachine } from "./session-creation.js";
+import {
+  commandAAD,
+  encryptRemoteControlPayload,
+  formatE2EEFingerprint,
+  sha256Hex,
+} from "./remote-e2ee.js";
+import { immutableEncryptionBinding, negotiateEncryptedControlSession } from "./e2ee-negotiation.js";
+import { decryptControllerCommandTerminal, decryptControllerEventEnvelope } from "./remote-e2ee-envelope.js";
 
 const DISABLED_GATES = Object.freeze({
   enrollment: false,
@@ -62,6 +70,8 @@ const state = {
   remoteConnectionEpoch: 0,
   remoteEventBuffer: [],
   remoteRecovery: null,
+  encryptedSessions: new Map(),
+  encryptedCommandAttempts: new Map(),
 };
 
 const element = (id) => document.getElementById(id);
@@ -82,9 +92,13 @@ const sessionCreation = new SessionCreationMachine({
     const device = selectedDevice();
     return {
       deviceId: state.selectedDeviceId,
-      deviceGeneration: device?.connectionGeneration ?? null,
       controlGeneration: state.controlGeneration,
       workspaceId: state.selectedWorkspaceId,
+      accountId: state.user?.id ?? null,
+      organizationId: state.activeOrgId,
+      encryptionBinding: state.sessionCreationAttempt?.controlSession
+        ? immutableEncryptionBinding(state.sessionCreationAttempt.controlSession, state.encryptedSessions.get(state.sessionCreationAttempt.controlSession.id))
+        : null,
     };
   },
   createKey: () => crypto.randomUUID(),
@@ -104,6 +118,7 @@ const sessionCreation = new SessionCreationMachine({
   listSessions: refreshRemoteSessions,
   establishBaseline: (sessionId) => selectRemoteSession(sessionId, { propagateFailure: true }),
   disposeControlSession(controlSession) {
+    dropEncryptedControlSession(controlSession?.id);
     return request(`/v1/desktop-control-sessions/${encodeURIComponent(controlSession.id)}`, { method: "DELETE" });
   },
   onChange(attempt) {
@@ -336,8 +351,7 @@ async function loadDevices() {
     const payload = await request("/v1/desktop-devices");
     state.devices = Array.isArray(payload?.items) ? payload.items : [];
     const attempt = state.sessionCreationAttempt;
-    const attemptDevice = attempt && state.devices.find((device) => device.id === attempt.deviceId);
-    if (attempt && (!attemptDevice || attemptDevice.connectionGeneration !== attempt.deviceGeneration)) sessionCreation.fence();
+    if (attempt && !state.devices.some((device) => device.id === attempt.deviceId)) sessionCreation.fence();
     if (activeDeviceId) {
       notifications.notify(notificationForDeviceTransition(
         previousDevices.get(activeDeviceId),
@@ -407,6 +421,13 @@ function renderDevices() {
       chip.textContent = value;
       meta.append(chip);
     }
+    if (device.payloadEncryption?.signingIdentity?.fingerprint) {
+      const fingerprint = document.createElement("code");
+      fingerprint.className = "device-fingerprint";
+      fingerprint.title = "Compare through an independent channel. This page cannot defend against actively malicious Cloud-delivered JavaScript.";
+      fingerprint.textContent = `identity ${formatE2EEFingerprint(device.payloadEncryption.signingIdentity.fingerprint)}`;
+      meta.append(fingerprint);
+    }
     const operationNode = item.querySelector(".device-operations");
     operationNode.innerHTML = operations.length
       ? `operations: <code></code>`
@@ -438,6 +459,14 @@ function selectedDevice() {
   return state.devices.find((device) => device.id === state.selectedDeviceId) || null;
 }
 
+function dropEncryptedControlSession(controlSessionId) {
+  if (!controlSessionId) return;
+  state.encryptedSessions.delete(controlSessionId);
+  for (const key of state.encryptedCommandAttempts.keys()) {
+    if (key.startsWith(`${controlSessionId}\0`)) state.encryptedCommandAttempts.delete(key);
+  }
+}
+
 function advertisedOperations(device = selectedDevice()) {
   return Array.isArray(device?.capabilities?.operations)
     ? device.capabilities.operations.flatMap((entry) => typeof entry?.operation === "string" && entry?.payloadVersions?.includes?.(1) ? [entry.operation] : [])
@@ -463,6 +492,8 @@ function resetRemoteBrowser() {
   state.remoteStreamState = "CLOSED";
   state.remoteConnectionEpoch = 0;
   state.controlBusy = false;
+  state.encryptedSessions.clear();
+  state.encryptedCommandAttempts.clear();
   if (prior?.id && state.token) void request(`/v1/desktop-control-sessions/${encodeURIComponent(prior.id)}`, { method: "DELETE" }).catch(() => undefined);
   renderRemoteBrowser();
   renderSnapshot();
@@ -471,11 +502,26 @@ function resetRemoteBrowser() {
 async function openControlSession({ workspaceId = null, sessionId = null } = {}) {
   const device = selectedDevice();
   if (!device || device.presence !== "online" || device.localControlEnabled !== true) throw new Error("Desktop 当前不可控制");
+  const encryptionRequired = state.featureGates.payloadEncryption === true;
+  const desktopEncryption = device.payloadEncryption;
+  if (encryptionRequired && (desktopEncryption?.mode !== "e2ee-v1" || !device.capabilities?.features?.includes?.("payload.e2ee-v1"))) {
+    throw new Error("Desktop did not advertise required end-to-end encryption");
+  }
+  if (encryptionRequired) {
+    const negotiated = await negotiateEncryptedControlSession({ device, workspaceId, sessionId, request });
+    state.encryptedSessions.set(negotiated.controlSession.id, negotiated.encryption);
+    return negotiated.controlSession;
+  }
   const session = await request("/v1/desktop-control-sessions", {
     method: "POST",
-    body: { schemaVersion: 1, deviceId: device.id, workspaceId, sessionId, mode: "view" },
+    body: {
+      schemaVersion: 1, deviceId: device.id, workspaceId, sessionId, mode: "view",
+    },
   });
   if (!session?.id || session.deviceId !== device.id) throw new Error("Control session 响应无效");
+  if (session.payloadEncryption?.mode === "e2ee-v1") {
+    throw new Error("Unexpected encrypted control session");
+  }
   return session;
 }
 
@@ -490,12 +536,48 @@ async function waitForCommand(controlSessionId, commandId, generation) {
   throw new Error("等待 Desktop 响应超时");
 }
 
+async function decryptCommandTerminal(controlSession, operation, terminal) {
+  return decryptControllerCommandTerminal({
+    terminal,
+    encryption: state.encryptedSessions.get(controlSession.id) || null,
+    controlSessionId: controlSession.id,
+    deviceId: controlSession.deviceId,
+    operation,
+  });
+}
+
 async function executeRemoteCommand(controlSession, operation, argumentsValue, generation, idempotencyKey = crypto.randomUUID(), onCommand = null) {
   let created;
   try {
+    const encryption = state.encryptedSessions.get(controlSession.id);
+    const workspaceId = typeof argumentsValue.workspaceId === "string" ? argumentsValue.workspaceId : null;
+    const sessionId = typeof argumentsValue.sessionId === "string" ? argumentsValue.sessionId : null;
+    const plaintextRequest = { operation, payloadVersion: 1, arguments: argumentsValue };
+    let encryptedPayload = null;
+    let payloadHash = null;
+    if (encryption) {
+      const attemptKey = `${controlSession.id}\0${idempotencyKey}`;
+      const canonicalRequest = JSON.stringify(plaintextRequest);
+      const prior = state.encryptedCommandAttempts.get(attemptKey);
+      if (prior && prior.canonicalRequest !== canonicalRequest) throw new Error("Idempotency key conflicts with a prior encrypted command");
+      if (prior) ({ encryptedPayload, payloadHash } = prior);
+      else {
+        encryptedPayload = await encryptRemoteControlPayload({
+          key: encryption.outboundKey,
+          aad: commandAAD({ controlSessionId: controlSession.id, deviceId: controlSession.deviceId, operation, workspaceId, sessionId, idempotencyKey, desktopKeyId: encryption.desktopKeyId, desktopStatementHash: encryption.desktopStatementHash, controllerKeyId: encryption.controllerKeyId }),
+          value: plaintextRequest,
+        });
+        payloadHash = await sha256Hex(JSON.stringify(encryptedPayload));
+        state.encryptedCommandAttempts.set(attemptKey, { canonicalRequest, encryptedPayload, payloadHash });
+      }
+    }
     created = await request(`/v1/desktop-control-sessions/${encodeURIComponent(controlSession.id)}/commands`, {
       method: "POST",
-      body: { schemaVersion: 1, operation, payloadVersion: 1, arguments: argumentsValue, idempotencyKey },
+      body: encryption ? {
+        schemaVersion: 1, operation, payloadVersion: 1, idempotencyKey,
+        payloadEncryption: { mode: "e2ee-v1", desktopKeyId: encryption.desktopKeyId, controllerKeyId: encryption.controllerKeyId },
+        routing: { workspaceId, sessionId, payloadHash }, encryptedPayload,
+      } : { schemaVersion: 1, operation, payloadVersion: 1, arguments: argumentsValue, idempotencyKey },
     });
   } catch (error) {
     error.ambiguousMutation = isMutationOperation(operation);
@@ -515,6 +597,7 @@ async function executeRemoteCommand(controlSession, operation, argumentsValue, g
     error.ambiguousMutation = isMutationOperation(operation);
     throw error;
   }
+  terminal = await decryptCommandTerminal(controlSession, operation, terminal);
   if (terminal.status !== "succeeded") {
     const error = new Error(terminal.error?.message || terminal.error?.code || `Command ${terminal.status}`);
     if (typeof terminal.error?.code === "string") error.code = terminal.error.code;
@@ -549,7 +632,7 @@ async function resumeSessionCreationCommand(controlSession, commandId) {
   state.controlBusy = true;
   renderRemoteBrowser();
   try {
-    const terminal = await waitForCommand(controlSession.id, commandId, generation);
+    const terminal = await decryptCommandTerminal(controlSession, "session.create", await waitForCommand(controlSession.id, commandId, generation));
     if (terminal.status !== "succeeded" || terminal.result?.operation !== "session.create") {
       const error = new Error(terminal.error?.message || terminal.error?.code || `Command ${terminal.status}`);
       if (typeof terminal.error?.code === "string") error.code = terminal.error.code;
@@ -596,7 +679,10 @@ async function runRemoteOperation(operation, argumentsValue, scope, { selected =
     }
     throw error;
   } finally {
-    if (disposable?.id) void request(`/v1/desktop-control-sessions/${encodeURIComponent(disposable.id)}`, { method: "DELETE" }).catch(() => undefined);
+    if (disposable?.id) {
+      dropEncryptedControlSession(disposable.id);
+      void request(`/v1/desktop-control-sessions/${encodeURIComponent(disposable.id)}`, { method: "DELETE" }).catch(() => undefined);
+    }
     if (generation === state.controlGeneration) state.controlBusy = false;
     renderRemoteBrowser();
   }
@@ -786,6 +872,7 @@ function closeSelectedControlSession() {
   state.remoteStream?.stop("CLOSED");
   state.remoteStream = null;
   const prior = state.controlSession;
+  dropEncryptedControlSession(prior?.id);
   state.controlSession = null;
   state.controlRenewal = createRenewalState();
   state.remoteModel = null;
@@ -819,6 +906,13 @@ async function renewSelectedControlSession() {
       throw new Error("Control session 续期响应无效");
     }
     state.controlSession = renewed;
+    const encryption = state.encryptedSessions.get(controlSession.id);
+    if (encryption) {
+      if (renewed.payloadEncryption?.mode !== "e2ee-v1" || renewed.payloadEncryption.desktopKeyId !== encryption.desktopKeyId ||
+          renewed.payloadEncryption.controllerKeyId !== encryption.controllerKeyId || renewed.payloadEncryption.desktopPublicKey !== encryption.desktopPublicKey) {
+        throw new Error("Renewed control session changed its encryption binding");
+      }
+    }
     const result = applyRenewalEvent({ type: "renew_succeeded" });
     log("success", "Control session 已续期", {
       authenticatedAt: renewed.authenticatedAt,
@@ -869,6 +963,8 @@ function startSelectedStream(generation) {
       if (generation !== state.controlGeneration) return;
       let envelope;
       try { envelope = JSON.parse(record.data); } catch { return requestSelectedRecovery("malformed_json", generation); }
+      try { envelope = await decryptSelectedEventEnvelope(envelope); }
+      catch { return requestSelectedRecovery("encrypted_event_invalid", generation); }
       if (!state.remoteModel?.installed) {
         if (state.remoteEventBuffer.length >= 1000) return requestSelectedRecovery("buffer_overflow", generation);
         state.remoteEventBuffer.push({ envelope, id: record.id });
@@ -885,6 +981,11 @@ function startSelectedStream(generation) {
     onLog(message, error) { if (generation === state.controlGeneration) log("info", message, { message: error?.message }); },
   });
   state.remoteStream.start();
+}
+
+async function decryptSelectedEventEnvelope(envelope) {
+  const encryption = state.controlSession ? state.encryptedSessions.get(state.controlSession.id) : null;
+  return decryptControllerEventEnvelope(envelope, encryption || null);
 }
 
 async function applySelectedEnvelope(envelope, sseId, generation) {
@@ -1320,6 +1421,7 @@ function renderNotificationPermission() {
 }
 
 function logout() {
+  void sessionCreation.disposeAndClear();
   resetRemoteBrowser();
   state.token = null;
   state.user = null;

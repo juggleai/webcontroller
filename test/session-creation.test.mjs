@@ -9,7 +9,7 @@ import {
   workspaceCreationScope,
 } from "../session-creation.js";
 
-const baseContext = { deviceId: "device-1", deviceGeneration: 4, controlGeneration: 7, workspaceId: "workspace-1" };
+const baseContext = { deviceId: "device-1", connectionGeneration: 4, controlGeneration: 7, workspaceId: "workspace-1", accountId: "account-1", organizationId: "org-1", encryptionBinding: "control-1\0desktop-1\0statement-1\0controller-1" };
 
 function harness(overrides = {}) {
   let context = { ...baseContext };
@@ -134,12 +134,14 @@ test("an absent exact ID remains blocked and never selects by title", async () =
   assert.equal(calls.some(([name]) => name === "baseline"), false);
 });
 
-test("device, connection generation, control generation, and workspace changes fence completions", async () => {
+test("device, control generation, workspace, account, organization, and encryption binding changes fence completions", async () => {
   for (const patch of [
     { deviceId: "device-2" },
-    { deviceGeneration: 5 },
     { controlGeneration: 8 },
     { workspaceId: "workspace-2" },
+    { accountId: "account-2" },
+    { organizationId: "org-2" },
+    { encryptionBinding: "control-1\0desktop-2\0statement-2\0controller-2" },
   ]) {
     let release;
     const waiting = new Promise((resolve) => { release = resolve; });
@@ -152,6 +154,17 @@ test("device, connection generation, control generation, and workspace changes f
     assert.equal(testHarness.machine.attempt.status, "reconciliation_required");
     assert.equal(testHarness.calls.some(([name]) => name === "list"), false);
   }
+});
+
+test("ordinary Desktop connection generation changes do not fence encrypted reconciliation", async () => {
+  let release;
+  const waiting = new Promise((resolve) => { release = resolve; });
+  const fixture = harness({ executeCreate: async ({ onCommand }) => { onCommand("command-1"); await waiting; return { sessionId: "created-1" }; } });
+  const pending = fixture.machine.submit({ title: "Title" });
+  await new Promise((resolve) => setImmediate(resolve));
+  fixture.setContext({ connectionGeneration: 99 });
+  release();
+  assert.deepEqual(await pending, { status: "succeeded", sessionId: "created-1" });
 });
 
 test("baseline failure retains reconciliation state and does not claim success", async () => {

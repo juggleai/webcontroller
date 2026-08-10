@@ -62,7 +62,9 @@ function sameContext(attempt, context) {
   return attempt.deviceId === context.deviceId &&
     attempt.controlGeneration === context.controlGeneration &&
     attempt.workspaceId === context.workspaceId &&
-    attempt.deviceGeneration === context.deviceGeneration;
+    attempt.accountId === context.accountId &&
+    attempt.organizationId === context.organizationId &&
+    (attempt.encryptionBinding === null || attempt.encryptionBinding === context.encryptionBinding);
 }
 
 export class SessionCreationMachine {
@@ -127,9 +129,11 @@ export class SessionCreationMachine {
     } else {
       this.attempt = {
         deviceId: context.deviceId,
-        deviceGeneration: context.deviceGeneration,
         controlGeneration: context.controlGeneration,
         workspaceId: context.workspaceId,
+        accountId: context.accountId,
+        organizationId: context.organizationId,
+        encryptionBinding: null,
         title,
         idempotencyKey: this.dependencies.createKey(),
         controlSession: null,
@@ -149,7 +153,7 @@ export class SessionCreationMachine {
         const controlSession = await this.dependencies.openControlSession(workspaceCreationScope(this.attempt.workspaceId));
         this.assertCurrent();
         if (controlSession.deviceId !== this.attempt.deviceId) throw new Error("Control session device mismatch");
-        this.update({ controlSession });
+        this.update({ controlSession, encryptionBinding: this.currentContext().encryptionBinding });
       } else {
         const controlSession = await this.dependencies.renewControlSession(this.attempt.controlSession);
         this.assertCurrent();

@@ -36,7 +36,7 @@ test("serves the DOM-free remote control modules", async (context) => {
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   context.after(() => server.close());
   const address = server.address();
-  for (const asset of ["sse.js", "remote-session-state.js", "remote-session-stream.js", "control-session-renewal.js", "remote-notifications.js", "session-creation.js"]) {
+  for (const asset of ["sse.js", "remote-session-state.js", "remote-session-stream.js", "control-session-renewal.js", "remote-notifications.js", "remote-e2ee.js", "e2ee-negotiation.js", "remote-e2ee-envelope.js", "session-creation.js"]) {
     const response = await fetch(`http://127.0.0.1:${address.port}/${asset}`);
     assert.equal(response.status, 200);
     assert.match(response.headers.get("content-type"), /javascript/);

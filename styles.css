@@ -117,6 +117,7 @@ button:not(:disabled):active { transform: translateY(1px); }
 .device small { display: block; color: var(--muted); margin-top: 3px; font-size: 10px; }
 .device-meta { display: flex; flex-wrap: wrap; gap: 6px; margin: 13px 0 0 20px; }
 .device-meta span { border: 1px solid var(--line); border-radius: 6px; color: #96a2b0; font: 500 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace; padding: 5px 7px; }
+.device-fingerprint { display: block; flex-basis: 100%; max-width: 100%; overflow-wrap: anywhere; color: #aeb8c4; font: 500 9px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .device-operations { margin: 12px 0 0 20px; color: var(--muted); font-size: 10px; }
 .device-operations code { color: var(--cyan); }
 
