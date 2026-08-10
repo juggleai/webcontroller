@@ -18,6 +18,7 @@ const files = new Map([
   ["/remote-session-state.js", ["remote-session-state.js", "text/javascript; charset=utf-8"]],
   ["/remote-session-stream.js", ["remote-session-stream.js", "text/javascript; charset=utf-8"]],
   ["/control-session-renewal.js", ["control-session-renewal.js", "text/javascript; charset=utf-8"]],
+  ["/session-creation.js", ["session-creation.js", "text/javascript; charset=utf-8"]],
   ["/remote-notifications.js", ["remote-notifications.js", "text/javascript; charset=utf-8"]],
   ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
 ]);

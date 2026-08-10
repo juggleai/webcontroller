@@ -135,6 +135,7 @@ button:not(:disabled):active { transform: translateY(1px); }
 .command-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
 .command-buttons button { font: 600 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .command-buttons button.prompt-btn:not(:disabled) { border-color: rgba(168,240,122,.3); }
+.command-buttons button.create-btn:not(:disabled) { border-color: rgba(98,212,255,.35); color: var(--cyan); }
 .command-buttons button.abort-btn:not(:disabled) { border-color: rgba(255,124,130,.3); color: var(--danger); }
 .control-session-status { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 16px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 11px; background: rgba(98,212,255,.045); }
 .control-session-status strong, .control-session-status span { display: block; }
@@ -146,7 +147,10 @@ button:not(:disabled):active { transform: translateY(1px); }
 .control-session-status.danger strong { color: var(--danger); }
 .control-session-status.success { border-color: rgba(168,240,122,.25); background: var(--accent-dim); }
 .control-session-status.success strong { color: var(--accent); }
-.prompt-panel { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
+.prompt-panel, .create-session-panel { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
+.create-session-panel { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0 14px; align-items: end; }
+.create-session-panel .button-row { margin-top: 0; }
+.mutation-guidance { grid-column: 1 / -1; color: var(--warn); font-size: 10px; line-height: 1.5; margin: 10px 2px 0; }
 .prompt-panel textarea { width: 100%; background: rgba(4,7,11,.55); border: 1px solid var(--line); border-radius: 11px; padding: 12px; color: var(--text); resize: vertical; outline: none; font: inherit; }
 .prompt-panel textarea:focus { border-color: rgba(168,240,122,.5); box-shadow: 0 0 0 3px rgba(168,240,122,.08); }
 .remote-browser { display: grid; grid-template-columns: .8fr 1fr 1.8fr; gap: 10px; margin-top: 18px; min-height: 420px; }
@@ -211,6 +215,8 @@ button:not(:disabled):active { transform: translateY(1px); }
   .remote-browser { grid-template-columns: 1fr; }
   .transcript-pane { grid-column: auto; }
   .command-panel { align-items: flex-start; flex-direction: column; }
+  .create-session-panel { grid-template-columns: 1fr; }
+  .create-session-panel .button-row { margin-top: 12px; }
   .control-session-status { align-items: flex-start; flex-direction: column; }
   .control-session-status button { width: 100%; }
   .card-heading { align-items: flex-start; }

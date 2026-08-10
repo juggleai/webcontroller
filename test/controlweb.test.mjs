@@ -12,7 +12,13 @@ test("serves the diagnostic page with restrictive browser headers", async (conte
   const response = await fetch(`http://127.0.0.1:${address.port}/`);
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-security-policy"), /default-src 'self'/);
-  assert.match(await response.text(), /远程控制诊断台/);
+  const page = await response.text();
+  assert.match(page, /远程控制诊断台/);
+  assert.match(page, /data-operation="session\.create"/);
+  assert.match(page, /id="createSessionForm"/);
+  assert.doesNotMatch(page, /id="sessionTitleInput"[^>]*maxlength=/);
+  assert.match(page, /Maximum 120 Unicode code points/);
+  assert.doesNotMatch(page, /id="createSessionForm"[\s\S]*name="prompt"/);
 });
 
 test("exposes a local health endpoint and rejects unknown files", async (context) => {
@@ -30,7 +36,7 @@ test("serves the DOM-free remote control modules", async (context) => {
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   context.after(() => server.close());
   const address = server.address();
-  for (const asset of ["sse.js", "remote-session-state.js", "remote-session-stream.js", "control-session-renewal.js", "remote-notifications.js"]) {
+  for (const asset of ["sse.js", "remote-session-state.js", "remote-session-stream.js", "control-session-renewal.js", "remote-notifications.js", "session-creation.js"]) {
     const response = await fetch(`http://127.0.0.1:${address.port}/${asset}`);
     assert.equal(response.status, 200);
     assert.match(response.headers.get("content-type"), /javascript/);

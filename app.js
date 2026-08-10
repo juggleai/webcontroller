@@ -2,6 +2,7 @@ import { applyRemoteSessionEvent, createRemoteSessionState, establishRemoteSnaps
 import { createRemoteSessionStream } from "./remote-session-stream.js";
 import { controlSessionExpiry, createCloudRequestError, createRenewalState, isMutationOperation, transitionRenewal } from "./control-session-renewal.js";
 import { createBrowserNotificationController, notificationForDeviceTransition, notificationForRemoteEvent, notificationForStreamTransition } from "./remote-notifications.js";
+import { canCreateSession, normalizeSessionTitle, SessionCreationMachine } from "./session-creation.js";
 
 const DISABLED_GATES = Object.freeze({
   enrollment: false,
@@ -52,6 +53,7 @@ const state = {
   snapshot: null,
   controlGeneration: 0,
   controlBusy: false,
+  sessionCreationAttempt: null,
   activeRunId: null,
   activeRunGeneration: 0,
   remoteModel: null,
@@ -72,6 +74,42 @@ const notifications = createBrowserNotificationController({
   focus() {
     window.focus();
     element("remoteBrowser")?.scrollIntoView({ block: "start", behavior: "smooth" });
+  },
+});
+
+const sessionCreation = new SessionCreationMachine({
+  currentContext() {
+    const device = selectedDevice();
+    return {
+      deviceId: state.selectedDeviceId,
+      deviceGeneration: device?.connectionGeneration ?? null,
+      controlGeneration: state.controlGeneration,
+      workspaceId: state.selectedWorkspaceId,
+    };
+  },
+  createKey: () => crypto.randomUUID(),
+  openControlSession,
+  async renewControlSession(controlSession) {
+    const renewed = await request(`/v1/desktop-control-sessions/${encodeURIComponent(controlSession.id)}/renew`, {
+      method: "POST",
+      body: { schemaVersion: 1 },
+    });
+    if (renewed?.id !== controlSession.id || renewed.deviceId !== controlSession.deviceId || renewed.status !== "active") {
+      throw new Error("Workspace control session renewal response is invalid");
+    }
+    return renewed;
+  },
+  executeCreate: runSessionCreationCommand,
+  resumeCommand: resumeSessionCreationCommand,
+  listSessions: refreshRemoteSessions,
+  establishBaseline: (sessionId) => selectRemoteSession(sessionId, { propagateFailure: true }),
+  disposeControlSession(controlSession) {
+    return request(`/v1/desktop-control-sessions/${encodeURIComponent(controlSession.id)}`, { method: "DELETE" });
+  },
+  onChange(attempt) {
+    state.sessionCreationAttempt = attempt;
+    renderSessionCreationGuidance();
+    renderRemoteBrowser();
   },
 });
 
@@ -297,6 +335,9 @@ async function loadDevices() {
   try {
     const payload = await request("/v1/desktop-devices");
     state.devices = Array.isArray(payload?.items) ? payload.items : [];
+    const attempt = state.sessionCreationAttempt;
+    const attemptDevice = attempt && state.devices.find((device) => device.id === attempt.deviceId);
+    if (attempt && (!attemptDevice || attemptDevice.connectionGeneration !== attempt.deviceGeneration)) sessionCreation.fence();
     if (activeDeviceId) {
       notifications.notify(notificationForDeviceTransition(
         previousDevices.get(activeDeviceId),
@@ -343,6 +384,7 @@ function renderDevices() {
     item.type = "button";
     item.className = `device ${device.id === state.selectedDeviceId ? "selected" : ""}`;
     item.dataset.deviceId = device.id;
+    item.disabled = Boolean(state.sessionCreationAttempt);
     const operations = Array.isArray(device.capabilities?.operations)
       ? device.capabilities.operations.map((entry) => entry.operation)
       : [];
@@ -403,6 +445,7 @@ function advertisedOperations(device = selectedDevice()) {
 }
 
 function resetRemoteBrowser() {
+  sessionCreation.fence();
   state.controlGeneration += 1;
   const prior = state.controlSession;
   state.remoteStream?.stop("CLOSED");
@@ -447,16 +490,76 @@ async function waitForCommand(controlSessionId, commandId, generation) {
   throw new Error("等待 Desktop 响应超时");
 }
 
-async function executeRemoteCommand(controlSession, operation, argumentsValue, generation) {
-  const created = await request(`/v1/desktop-control-sessions/${encodeURIComponent(controlSession.id)}/commands`, {
-    method: "POST",
-    body: { schemaVersion: 1, operation, payloadVersion: 1, arguments: argumentsValue, idempotencyKey: crypto.randomUUID() },
-  });
-  if (!created?.commandId) throw new Error("Command 创建响应无效");
+async function executeRemoteCommand(controlSession, operation, argumentsValue, generation, idempotencyKey = crypto.randomUUID(), onCommand = null) {
+  let created;
+  try {
+    created = await request(`/v1/desktop-control-sessions/${encodeURIComponent(controlSession.id)}/commands`, {
+      method: "POST",
+      body: { schemaVersion: 1, operation, payloadVersion: 1, arguments: argumentsValue, idempotencyKey },
+    });
+  } catch (error) {
+    error.ambiguousMutation = isMutationOperation(operation);
+    throw error;
+  }
+  if (!created?.commandId) {
+    const error = new Error("Command 创建响应无效");
+    error.ambiguousMutation = isMutationOperation(operation);
+    throw error;
+  }
+  onCommand?.(created.commandId);
   log("info", "command 已创建", { commandId: created.commandId, status: created.status });
-  const terminal = await waitForCommand(controlSession.id, created.commandId, generation);
-  if (terminal.status !== "succeeded" || terminal.result?.operation !== operation) throw new Error(terminal.error?.message || terminal.error?.code || `Command ${terminal.status}`);
+  let terminal;
+  try {
+    terminal = await waitForCommand(controlSession.id, created.commandId, generation);
+  } catch (error) {
+    error.ambiguousMutation = isMutationOperation(operation);
+    throw error;
+  }
+  if (terminal.status !== "succeeded") {
+    const error = new Error(terminal.error?.message || terminal.error?.code || `Command ${terminal.status}`);
+    if (typeof terminal.error?.code === "string") error.code = terminal.error.code;
+    error.safeTerminal = true;
+    throw error;
+  }
+  if (terminal.result?.operation !== operation) {
+    const error = new Error("Command terminal result operation is invalid");
+    error.ambiguousMutation = isMutationOperation(operation);
+    throw error;
+  }
   return { commandId: created.commandId, result: terminal.result.result };
+}
+
+async function runSessionCreationCommand({ controlSession, arguments: argumentsValue, idempotencyKey, onCommand }) {
+  if (state.controlBusy) throw new Error("Another remote operation is in progress");
+  const generation = state.controlGeneration;
+  state.controlBusy = true;
+  renderRemoteBrowser();
+  try {
+    const completed = await executeRemoteCommand(controlSession, "session.create", argumentsValue, generation, idempotencyKey, onCommand);
+    return completed.result;
+  } finally {
+    if (generation === state.controlGeneration) state.controlBusy = false;
+    renderRemoteBrowser();
+  }
+}
+
+async function resumeSessionCreationCommand(controlSession, commandId) {
+  if (state.controlBusy) throw new Error("Another remote operation is in progress");
+  const generation = state.controlGeneration;
+  state.controlBusy = true;
+  renderRemoteBrowser();
+  try {
+    const terminal = await waitForCommand(controlSession.id, commandId, generation);
+    if (terminal.status !== "succeeded" || terminal.result?.operation !== "session.create") {
+      const error = new Error(terminal.error?.message || terminal.error?.code || `Command ${terminal.status}`);
+      if (typeof terminal.error?.code === "string") error.code = terminal.error.code;
+      throw error;
+    }
+    return terminal.result.result;
+  } finally {
+    if (generation === state.controlGeneration) state.controlBusy = false;
+    renderRemoteBrowser();
+  }
 }
 
 function applyRenewalEvent(event) {
@@ -467,7 +570,7 @@ function applyRenewalEvent(event) {
   return result;
 }
 
-async function runRemoteOperation(operation, argumentsValue, scope, { selected = false, withCommand = false } = {}) {
+async function runRemoteOperation(operation, argumentsValue, scope, { selected = false, withCommand = false, idempotencyKey, onCommand } = {}) {
   if (state.controlBusy) throw new Error("已有远程读取正在进行");
   const device = selectedDevice();
   const ops = advertisedOperations(device);
@@ -480,7 +583,7 @@ async function runRemoteOperation(operation, argumentsValue, scope, { selected =
   try {
     const session = selected ? state.controlSession : (disposable = await openControlSession(scope));
     if (!session || generation !== state.controlGeneration) throw new Error("操作已取消");
-    const completed = await executeRemoteCommand(session, operation, argumentsValue, generation);
+    const completed = await executeRemoteCommand(session, operation, argumentsValue, generation, idempotencyKey, onCommand);
     return withCommand ? completed : completed.result;
   } catch (error) {
     if (selected && isMutationOperation(operation)) {
@@ -500,6 +603,7 @@ async function runRemoteOperation(operation, argumentsValue, scope, { selected =
 }
 
 async function loadRemoteWorkspaces() {
+  if (state.sessionCreationAttempt) return;
   const device = selectedDevice();
   if (state.controlSession) closeSelectedControlSession();
   log("info", "开始读取工作区", { deviceId: state.selectedDeviceId, operations: advertisedOperations(device) });
@@ -522,6 +626,7 @@ async function loadRemoteWorkspaces() {
 }
 
 async function selectRemoteWorkspace(workspaceId) {
+  if (state.sessionCreationAttempt && state.selectedWorkspaceId !== workspaceId) return;
   if (state.selectedWorkspaceId !== workspaceId) closeSelectedControlSession();
   state.selectedWorkspaceId = workspaceId;
   state.selectedSessionId = null;
@@ -541,14 +646,85 @@ async function selectRemoteWorkspace(workspaceId) {
   renderRemoteBrowser();
 }
 
-async function selectRemoteSession(sessionId) {
+async function refreshRemoteSessions(workspaceId) {
+  const result = await runRemoteOperation("session.list", { workspaceId }, { workspaceId });
+  if (state.selectedWorkspaceId !== workspaceId) throw new Error("Selected workspace changed during refresh");
+  state.sessions = Array.isArray(result?.sessions) ? result.sessions : [];
+  log("success", "session.list 完成", { count: state.sessions.length });
+  renderRemoteBrowser();
+  return state.sessions;
+}
+
+function renderSessionCreationGuidance() {
+  const node = element("createSessionGuidance");
+  const attempt = state.sessionCreationAttempt;
+  let message = "";
+  if (attempt?.status === "reauthentication_required") {
+    message = "Reauthentication is required. Retry explicitly to renew the retained workspace control session and reuse the same attempt key.";
+  } else if (attempt?.status === "ambiguous") {
+    message = "Creation outcome is ambiguous. Use session.list to reconcile this retained attempt on its original device and workspace.";
+  } else if (attempt?.status === "reconciliation_required") {
+    message = "Creation requires reconciliation. Use session.list on the original device and workspace; no new key or title-based selection is allowed.";
+  } else if (["submitting", "polling", "reconciling"].includes(attempt?.status)) {
+    message = "Creation is in progress. Device and workspace selection are locked until it reaches a safe state.";
+  }
+  node.textContent = message;
+  node.classList.toggle("hidden", !message);
+}
+
+async function createRemoteSession(event) {
+  event.preventDefault();
+  if (["submitting", "polling", "reconciling"].includes(state.sessionCreationAttempt?.status)) return;
+  const workspaceId = state.selectedWorkspaceId;
+  const titleValue = element("sessionTitleInput").value;
+  if (!canCreateSession({
+    workspaceId,
+    device: selectedDevice(),
+    featureGates: state.featureGates,
+    operations: advertisedOperations(),
+    controlBusy: state.controlBusy,
+    attempt: state.sessionCreationAttempt?.status === "reauthentication_required" ? null : state.sessionCreationAttempt,
+  })) return;
+
+  try {
+    if (!state.sessionCreationAttempt && state.controlSession) {
+      closeSelectedControlSession();
+      state.selectedSessionId = null;
+      state.snapshot = null;
+      renderSnapshot();
+    }
+    const result = await sessionCreation.submit({ title: titleValue });
+    if (result.status !== "succeeded") return;
+    element("createSessionForm").classList.add("hidden");
+    element("sessionTitleInput").value = "";
+    toast("Empty session created; send a prompt separately when ready");
+  } catch (error) {
+    log("error", "session.create 失败", { message: error instanceof Error ? error.message : "unknown" });
+    if (state.sessionCreationAttempt?.status === "ambiguous") {
+      toast("Outcome ambiguous; refresh sessions before retrying");
+    } else if (state.sessionCreationAttempt?.status === "reauthentication_required") {
+      toast("Reauthentication required; retry explicitly when ready");
+    } else {
+      toast(error instanceof Error ? error.message : "Session creation failed");
+    }
+    renderSessionCreationGuidance();
+  } finally {
+    renderRemoteBrowser();
+  }
+}
+
+async function selectRemoteSession(sessionId, { propagateFailure = false } = {}) {
   const workspaceId = state.selectedWorkspaceId;
   if (!workspaceId) return;
   if (state.selectedSessionId === sessionId && state.controlSession) {
-    await requestSelectedRecovery("manual_refresh", state.controlGeneration);
+    try {
+      await requestSelectedRecovery("manual_refresh", state.controlGeneration, propagateFailure);
+    } catch (error) {
+      if (propagateFailure) throw error;
+    }
     return;
   }
-  if (state.selectedSessionId !== sessionId) closeSelectedControlSession();
+  if (state.controlSession && state.selectedSessionId !== sessionId) closeSelectedControlSession();
   state.selectedSessionId = sessionId;
   state.snapshot = null;
   state.remoteStreamState = "CONNECTING";
@@ -559,6 +735,7 @@ async function selectRemoteSession(sessionId) {
     const controlSession = await openControlSession({ workspaceId, sessionId });
     if (generation !== state.controlGeneration || state.selectedSessionId !== sessionId) {
       void request(`/v1/desktop-control-sessions/${encodeURIComponent(controlSession.id)}`, { method: "DELETE" }).catch(() => undefined);
+      if (propagateFailure) throw new Error("Session selection was fenced before its baseline was established");
       return;
     }
     state.controlSession = controlSession;
@@ -566,12 +743,16 @@ async function selectRemoteSession(sessionId) {
     state.remoteModel = createRemoteSessionState({ controlSessionId: controlSession.id, deviceId: controlSession.deviceId, workspaceId, sessionId });
     startSelectedStream(generation);
     const completed = await runRemoteOperation("session.snapshot", { workspaceId, sessionId }, { workspaceId, sessionId }, { selected: true, withCommand: true });
-    if (generation !== state.controlGeneration || state.selectedSessionId !== sessionId) return;
+    if (generation !== state.controlGeneration || state.selectedSessionId !== sessionId) {
+      if (propagateFailure) throw new Error("Session selection was fenced before its baseline was established");
+      return;
+    }
     await installSelectedSnapshot(completed.result, completed.commandId, false, generation);
     log("success", "session.snapshot 完成", { messages: completed.result?.messages?.length || 0, todos: completed.result?.todos?.length || 0 });
   } catch (error) {
     log("error", "session.snapshot 失败", { message: error instanceof Error ? error.message : "unknown" });
     toast(error instanceof Error ? error.message : "读取会话快照失败");
+    if (propagateFailure) throw error;
   }
   renderRemoteBrowser();
 }
@@ -760,7 +941,7 @@ async function refreshSelectedSnapshot(generation, recovery = false) {
   if (generation === state.controlGeneration) await installSelectedSnapshot(completed.result, completed.commandId, recovery, generation);
 }
 
-function requestSelectedRecovery(reason, generation) {
+function requestSelectedRecovery(reason, generation, propagateFailure = false) {
   if (generation !== state.controlGeneration) return Promise.resolve();
   if (state.remoteRecovery) return state.remoteRecovery;
   state.remoteStreamState = "RESYNCING";
@@ -769,6 +950,7 @@ function requestSelectedRecovery(reason, generation) {
     .catch((error) => {
       if (generation !== state.controlGeneration) return;
       log("error", "快照恢复失败", { reason, message: error.message });
+      if (propagateFailure) throw error;
       void recreateSelectedControlSession(generation);
     })
     .finally(() => { if (generation === state.controlGeneration) state.remoteRecovery = null; });
@@ -810,9 +992,19 @@ function renderRemoteBrowser() {
   for (const button of buttonElements) {
     const operation = button.dataset.operation;
     if (operation === "workspace.list") {
-      button.disabled = state.controlBusy || !operations.includes("workspace.list");
+      button.disabled = state.controlBusy || Boolean(state.sessionCreationAttempt) || !operations.includes("workspace.list");
     } else if (operation === "session.list") {
-      button.disabled = state.controlBusy || !state.selectedWorkspaceId || !operations.includes("session.list");
+      const canReconcile = ["ambiguous", "reconciliation_required"].includes(state.sessionCreationAttempt?.status);
+      button.disabled = state.controlBusy || (!canReconcile && Boolean(state.sessionCreationAttempt)) || !state.selectedWorkspaceId || !operations.includes("session.list");
+    } else if (operation === "session.create") {
+      button.disabled = !canCreateSession({
+        workspaceId: state.selectedWorkspaceId,
+        device: selectedDevice(),
+        featureGates: state.featureGates,
+        operations,
+        controlBusy: state.controlBusy,
+        attempt: state.sessionCreationAttempt,
+      });
     } else if (operation === "session.snapshot") {
       button.disabled = state.controlBusy || !state.selectedSessionId || !operations.includes("session.snapshot");
     } else if (operation === "session.prompt") {
@@ -823,6 +1015,23 @@ function renderRemoteBrowser() {
   }
   const sendButton = element("sendPromptButton");
   if (sendButton) sendButton.disabled = unsafe || !state.selectedSessionId;
+  const createButton = element("createSessionButton");
+  let validTitle = false;
+  try {
+    normalizeSessionTitle(element("sessionTitleInput").value);
+    validTitle = true;
+  } catch {}
+  if (createButton) createButton.disabled = !canCreateSession({
+    workspaceId: state.selectedWorkspaceId,
+    device: selectedDevice(),
+    featureGates: state.featureGates,
+    operations,
+    controlBusy: state.controlBusy,
+    attempt: state.sessionCreationAttempt?.status === "reauthentication_required" ? null : state.sessionCreationAttempt,
+  }) || !validTitle;
+  const creationActive = Boolean(state.sessionCreationAttempt);
+  element("sessionTitleInput").disabled = creationActive;
+  element("cancelCreateSessionButton").disabled = creationActive;
   element("workspaceCount").textContent = String(state.workspaces.length);
   element("sessionCount").textContent = String(state.sessions.length);
   element("snapshotStatus").textContent = state.remoteStreamState;
@@ -838,6 +1047,7 @@ function renderRemoteBrowser() {
     button.innerHTML = "<strong></strong><small></small>";
     button.querySelector("strong").textContent = workspace.name;
     button.querySelector("small").textContent = workspace.id;
+    button.disabled = creationActive;
     button.addEventListener("click", () => void selectRemoteWorkspace(workspace.id));
     workspaces.append(button);
   }
@@ -851,6 +1061,7 @@ function renderRemoteBrowser() {
     button.innerHTML = "<strong></strong><small></small>";
     button.querySelector("strong").textContent = session.title;
     button.querySelector("small").textContent = `${session.status} · ${new Date(session.updatedAt).toLocaleString("zh-CN")}`;
+    button.disabled = creationActive;
     button.addEventListener("click", () => void selectRemoteSession(session.id));
     sessions.append(button);
   }
@@ -1176,7 +1387,21 @@ function wireEvents() {
     renderNotificationPermission();
   });
   document.querySelector('[data-operation="workspace.list"]').addEventListener("click", () => void loadRemoteWorkspaces());
-  document.querySelector('[data-operation="session.list"]').addEventListener("click", () => state.selectedWorkspaceId && void selectRemoteWorkspace(state.selectedWorkspaceId));
+  document.querySelector('[data-operation="session.list"]').addEventListener("click", () => {
+    if (!state.selectedWorkspaceId) return;
+    if (["ambiguous", "reconciliation_required"].includes(state.sessionCreationAttempt?.status)) {
+      void sessionCreation.reconcile().catch((error) => {
+        log("error", "session.create reconciliation failed", { message: error.message });
+        toast(error.message);
+      });
+      return;
+    }
+    void selectRemoteWorkspace(state.selectedWorkspaceId);
+  });
+  document.querySelector('[data-operation="session.create"]').addEventListener("click", () => {
+    element("createSessionForm").classList.remove("hidden");
+    element("sessionTitleInput").focus();
+  });
   document.querySelector('[data-operation="session.snapshot"]').addEventListener("click", () => state.selectedSessionId && void selectRemoteSession(state.selectedSessionId));
   document.querySelector('[data-operation="session.prompt"]').addEventListener("click", () => {
     if (!state.selectedSessionId) return;
@@ -1189,6 +1414,12 @@ function wireEvents() {
     element("promptInput").value = "";
   });
   element("sendPromptButton").addEventListener("click", () => void sendRemotePrompt());
+  element("createSessionForm").addEventListener("submit", (event) => void createRemoteSession(event));
+  element("sessionTitleInput").addEventListener("input", renderRemoteBrowser);
+  element("cancelCreateSessionButton").addEventListener("click", () => {
+    element("createSessionForm").classList.add("hidden");
+    if (!state.sessionCreationAttempt) element("sessionTitleInput").value = "";
+  });
   element("renewControlSessionButton").addEventListener("click", () => void renewSelectedControlSession());
   for (const button of document.querySelectorAll("[data-login-mode]")) {
     button.addEventListener("click", () => {

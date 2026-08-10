@@ -145,11 +145,24 @@
           <div class="command-buttons">
             <button type="button" disabled data-operation="workspace.list">workspace.list</button>
             <button type="button" disabled data-operation="session.list">session.list</button>
+            <button type="button" disabled data-operation="session.create" class="create-btn">session.create</button>
             <button type="button" disabled data-operation="session.snapshot">session.snapshot</button>
             <button type="button" disabled data-operation="session.prompt" class="prompt-btn">session.prompt</button>
             <button type="button" disabled data-operation="session.abort" class="abort-btn">session.abort</button>
           </div>
         </div>
+        <form class="create-session-panel hidden" id="createSessionForm">
+          <label>
+            <span>New empty session title</span>
+            <input id="sessionTitleInput" aria-describedby="sessionTitleLimit createSessionGuidance" placeholder="Title only; prompt is sent separately" />
+            <small id="sessionTitleLimit">Maximum 120 Unicode code points. Control characters are not allowed.</small>
+          </label>
+          <div class="button-row">
+            <button class="primary" id="createSessionButton" type="submit" disabled>Create empty session</button>
+            <button class="ghost" id="cancelCreateSessionButton" type="button">Cancel</button>
+          </div>
+          <p class="mutation-guidance hidden" id="createSessionGuidance" role="status"></p>
+        </form>
         <div class="control-session-status hidden" id="controlSessionStatus" role="status">
           <div>
             <strong id="controlSessionStatusTitle">Control session active</strong>

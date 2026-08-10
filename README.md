@@ -63,12 +63,31 @@ The webcontroller can read the local workspace, sessions, and snapshots, and
 apply normalized incremental `transcript`, `todo`, `interaction`, and `status`
 events. When the device advertises the capability and policy allows it, the
 console also supports `session.prompt` and guarded `session.abort` operations.
+When the selected live Desktop advertises `session.create` and all mutation
+gates allow it, the console can create a title-only, empty root session in the
+selected workspace. Creation does not accept or send a prompt. After the
+authoritative session ID is returned, the console refreshes `session.list`,
+selects only that exact ID, and starts the existing snapshot and SSE flow; use
+`session.prompt` as a separate explicit step.
 It can surface secure notifications for interaction waits, terminal run states,
 closed or disconnected control connections, and revoked or unavailable
 devices.
 
 Control sessions can be explicitly renewed before they expire. If a write
 operation returns `control_session_reauthentication_required`, the console
-renews the session and asks the user to retry; it never replays the operation
-automatically. Expired or closed sessions are rebuilt from a fresh snapshot.
+renews the retained scoped session and asks the user to retry with the same
+attempt key; it never replays the operation automatically. Expired or closed
+selected sessions are rebuilt from a fresh snapshot.
+Session creation keeps one idempotency key in page memory for each logical
+attempt and blocks duplicate submission. If the outcome is ambiguous, or the
+returned ID is absent from the refreshed canonical list, it retains and blocks
+the attempt instead of retrying with a new key or guessing by title/order. Use
+`session.list` to reconcile the exact ID on the original device and workspace;
+creation is complete only after snapshot/SSE baseline establishment succeeds.
+
+Roll out Cloud allowlist and validation support first, then Desktop execution
+and capability advertisement, and finally this Web affordance. Older Desktop
+versions remain safe because the create action stays disabled until the live
+device explicitly advertises `session.create`; rollout can be halted by
+disabling `sessionMutation` or withholding that advertisement.
 Historical transcript pagination is not implemented yet.

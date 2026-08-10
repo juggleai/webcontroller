@@ -6,6 +6,7 @@ import {
   controlSessionExpiry,
   createCloudRequestError,
   createRenewalState,
+  isMutationOperation,
   transitionRenewal,
 } from "../control-session-renewal.js";
 
@@ -43,6 +44,24 @@ test("reauthentication requires one explicit renewal and never replays the mutat
 
   const renewed = transitionRenewal(requested.state, { type: "renew_succeeded" });
   assert.deepEqual(renewed.effects, ["update_session", "tell_user_to_retry"]);
+  assert.equal(renewed.replayMutation, false);
+  assert.equal(renewed.effects.includes("execute_mutation"), false);
+});
+
+test("classifies session creation as a mutation with no automatic reauthentication replay", () => {
+  assert.equal(isMutationOperation("session.create"), true);
+  const required = transitionRenewal(createRenewalState(), {
+    type: "command_failed",
+    operation: "session.create",
+    errorCode: "control_session_reauthentication_required",
+  });
+  assert.equal(required.state.phase, "renew_required");
+  assert.equal(required.replayMutation, false);
+  const renewed = transitionRenewal(
+    transitionRenewal(required.state, { type: "renew_requested" }).state,
+    { type: "renew_succeeded" },
+  );
+  assert.equal(renewed.state.phase, "retry_required");
   assert.equal(renewed.replayMutation, false);
   assert.equal(renewed.effects.includes("execute_mutation"), false);
 });

@@ -1,6 +1,7 @@
 export const CONTROL_SESSION_EXPIRY_WARNING_MS = 2 * 60 * 1000;
 
 const MUTATION_OPERATIONS = new Set([
+  "session.create",
   "session.prompt",
   "session.abort",
   "interaction.permission.reply",
