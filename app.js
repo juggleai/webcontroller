@@ -848,16 +848,33 @@ async function sendRemotePrompt() {
   const sessionId = state.selectedSessionId;
   if (!workspaceId || !sessionId) return;
   const prompt = element("promptInput").value.trim();
+  const selectedWhenBusy = element("whenBusySelect").value;
+  const features = state.selectedDevice?.capabilities?.features || [];
+  const whenBusy = selectedWhenBusy === "steer" && features.includes("session.steer")
+    ? "steer"
+    : selectedWhenBusy === "enqueue" && features.includes("session.enqueue") ? "enqueue" : "reject";
+  if (selectedWhenBusy !== whenBusy) {
+    toast("Desktop 未独立声明该运行中会话能力");
+    return;
+  }
   if (!prompt) return;
   element("sendPromptButton").disabled = true;
   try {
-    const result = await runRemoteOperation("session.prompt", { workspaceId, sessionId, prompt }, { workspaceId, sessionId }, { selected: true });
-    state.activeRunId = result.runId;
-    state.activeRunGeneration = result.generation;
+    const result = await runRemoteOperation("session.prompt", { workspaceId, sessionId, prompt, whenBusy }, { workspaceId, sessionId }, { selected: true });
+    if (result.disposition === "started") {
+      state.activeRunId = result.runId;
+      state.activeRunGeneration = result.generation;
+    } else {
+      const status = element("pendingOperationStatus");
+      status.classList.remove("hidden");
+      status.textContent = result.disposition === "enqueued"
+        ? `已在 Desktop 本机排队（位置 ${result.position}，ID ${result.pendingOperationId}）`
+        : `已 steer 当前运行（ID ${result.pendingOperationId}）`;
+    }
     element("promptPanel").classList.add("hidden");
     element("promptInput").value = "";
-    log("success", "Prompt 已提交", { runId: result.runId, generation: result.generation });
-    toast("Prompt 已提交到 Desktop");
+    log("success", "Prompt 已提交", { disposition: result.disposition, pendingOperationId: result.pendingOperationId || null });
+    toast(result.disposition === "enqueued" ? "Prompt 已在 Desktop 本机持久排队" : "Prompt 已提交到 Desktop");
   } catch (error) {
     log("error", "Prompt 提交失败", { message: error instanceof Error ? error.message : "unknown" });
     toast(error instanceof Error ? error.message : "Prompt 提交失败");

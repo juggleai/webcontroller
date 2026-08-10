@@ -176,10 +176,19 @@
             <span>Prompt</span>
             <textarea id="promptInput" rows="3" placeholder="输入要发送到 Desktop 的 prompt"></textarea>
           </label>
+          <label>
+            <span>会话忙碌时</span>
+            <select id="whenBusySelect">
+              <option value="reject">拒绝（默认）</option>
+              <option value="steer">Steer 当前运行</option>
+              <option value="enqueue">本机持久排队</option>
+            </select>
+          </label>
           <div class="button-row">
             <button class="primary" id="sendPromptButton" type="button" disabled>发送 Prompt</button>
             <button class="ghost" id="cancelPromptButton" type="button">取消</button>
           </div>
+          <div class="mutation-guidance hidden" id="pendingOperationStatus" role="status"></div>
         </div>
         <div class="remote-browser" id="remoteBrowser">
           <div class="browser-pane">
