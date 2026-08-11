@@ -16,7 +16,7 @@ const snapshot = {
   schemaVersion: 1,
   workspace: { id: scope.workspaceId, name: "Work" },
   session: { id: scope.sessionId, workspaceId: scope.workspaceId, title: "Session", status: "running", createdAt: now, updatedAt: now, activeRunId: "run_1" },
-  messages: [], todos: [], interactions: [], capturedAt: now,
+  messages: [], todos: [], interactions: [], pendingOperations: [], capturedAt: now,
 };
 
 function envelope(sequence, data, overrides = {}) {

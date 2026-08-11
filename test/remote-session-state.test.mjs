@@ -7,7 +7,7 @@ const scope = { controlSessionId: "11111111-1111-4111-8111-111111111111", device
 const now = "2026-08-09T00:00:00.000Z";
 const part = { type: "text", id: "part_1", text: "hello" };
 const message = { id: "message_1", role: "assistant", createdAt: now, completedAt: null, parts: [part] };
-const snapshot = { schemaVersion: 1, workspace: { id: scope.workspaceId, name: "Work" }, session: { id: scope.sessionId, workspaceId: scope.workspaceId, title: "Session", status: "idle", createdAt: now, updatedAt: now, activeRunId: null }, messages: [message], todos: [], interactions: [], capturedAt: now };
+const snapshot = { schemaVersion: 1, workspace: { id: scope.workspaceId, name: "Work" }, session: { id: scope.sessionId, workspaceId: scope.workspaceId, title: "Session", status: "idle", createdAt: now, updatedAt: now, activeRunId: null }, messages: [message], todos: [], interactions: [], pendingOperations: [], capturedAt: now };
 
 function event(sequence, cursor, data, overrides = {}) {
   return { schemaVersion: 1, payloadVersion: 1, eventId: `00000000-0000-4000-8000-${String(sequence).padStart(12, "0")}`, cursor, sequence, controlSessionId: scope.controlSessionId, deviceId: scope.deviceId, commandId: null, workspaceId: scope.workspaceId, sessionId: scope.sessionId, runId: null, occurredAt: now, data, ...overrides };
@@ -77,6 +77,28 @@ test("snapshot_required returns recovery effect and malformed snapshots fail clo
   assert.deepEqual(result.effects, [{ type: "resync", reason: "sequence_gap" }]);
   assert.throws(() => installRemoteSnapshot(createRemoteSessionState(scope), { ...snapshot, extra: true }), /Malformed/);
   assert.throws(() => installRemoteSnapshot(createRemoteSessionState(scope), { ...snapshot, messages: [message, message] }), /Duplicate/);
+});
+
+test("strictly validates pending operation snapshot entries", () => {
+  const valid = { id: "pending_1", mode: "enqueue", position: 1, status: "pending" };
+  assert.doesNotThrow(() => installRemoteSnapshot(createRemoteSessionState(scope), { ...snapshot, pendingOperations: [valid] }));
+  for (const malformed of [
+    { ...valid, extra: true },
+    { ...valid, id: "" },
+    { ...valid, id: " pending" },
+    { ...valid, id: "a\n" },
+    { ...valid, id: "界".repeat(86) },
+    { ...valid, mode: "reject" },
+    { ...valid, mode: "ENQUEUE" },
+    { ...valid, position: 0 },
+    { ...valid, position: -1 },
+    { ...valid, position: 1.5 },
+    { ...valid, position: Number.MAX_SAFE_INTEGER + 1 },
+    { ...valid, status: "running" },
+  ]) {
+    assert.throws(() => installRemoteSnapshot(createRemoteSessionState(scope), { ...snapshot, pendingOperations: [malformed] }), RemoteStateError);
+  }
+  assert.throws(() => installRemoteSnapshot(createRemoteSessionState(scope), { ...snapshot, pendingOperations: [valid, valid] }), /Duplicate/);
 });
 
 test("establishes a trusted snapshot baseline at its exact terminal command lifecycle", () => {

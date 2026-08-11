@@ -4,6 +4,7 @@ const MUTATION_OPERATIONS = new Set([
   "session.create",
   "session.prompt",
   "session.abort",
+  "session.pending.cancel",
   "interaction.permission.reply",
   "interaction.question.reply",
 ]);

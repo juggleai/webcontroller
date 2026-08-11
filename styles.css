@@ -152,6 +152,8 @@ button:not(:disabled):active { transform: translateY(1px); }
 .create-session-panel { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0 14px; align-items: end; }
 .create-session-panel .button-row { margin-top: 0; }
 .mutation-guidance { grid-column: 1 / -1; color: var(--warn); font-size: 10px; line-height: 1.5; margin: 10px 2px 0; }
+.pending-operation-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 0; border-top: 1px solid var(--line); }
+.pending-operation-row:first-child { border-top: 0; }
 .prompt-panel textarea { width: 100%; background: rgba(4,7,11,.55); border: 1px solid var(--line); border-radius: 11px; padding: 12px; color: var(--text); resize: vertical; outline: none; font: inherit; }
 .prompt-panel textarea:focus { border-color: rgba(168,240,122,.5); box-shadow: 0 0 0 3px rgba(168,240,122,.08); }
 .remote-browser { display: grid; grid-template-columns: .8fr 1fr 1.8fr; gap: 10px; margin-top: 18px; min-height: 420px; }

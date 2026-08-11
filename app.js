@@ -11,6 +11,7 @@ import {
 } from "./remote-e2ee.js";
 import { immutableEncryptionBinding, negotiateEncryptedControlSession } from "./e2ee-negotiation.js";
 import { decryptControllerCommandTerminal, decryptControllerEventEnvelope } from "./remote-e2ee-envelope.js";
+import { createPendingEnqueueState, isDefinitiveEnqueueOutcome, prepareEnqueueSubmission, resolveBusyMode, validRemotePrompt } from "./busy-session-state.js";
 
 const DISABLED_GATES = Object.freeze({
   enrollment: false,
@@ -64,6 +65,7 @@ const state = {
   sessionCreationAttempt: null,
   activeRunId: null,
   activeRunGeneration: 0,
+  pendingEnqueues: createPendingEnqueueState(100, window.localStorage),
   remoteModel: null,
   remoteStream: null,
   remoteStreamState: "CLOSED",
@@ -291,6 +293,7 @@ async function loadOrganizations() {
   const payload = await request("/v1/me/orgs");
   state.organizations = Array.isArray(payload?.orgs) ? payload.orgs : [];
   state.activeOrgId = payload?.activeOrgId || state.organizations[0]?.id || null;
+  fenceAuthenticatedOperationalState();
   const select = element("organization");
   select.innerHTML = "";
   for (const organization of state.organizations) {
@@ -313,8 +316,10 @@ async function selectOrganization() {
     method: "POST",
     body: { organizationId },
   });
+  resetRemoteBrowser();
   state.activeOrgId = organizationId;
   state.selectedDeviceId = null;
+  fenceAuthenticatedOperationalState();
   log("success", "活动组织已切换", { organizationId });
   await loadPolicyAndDevices();
 }
@@ -345,6 +350,7 @@ async function loadPolicy() {
 async function loadDevices() {
   if (!state.token || !state.activeOrgId) return;
   element("refreshDevicesButton").disabled = true;
+  const selectedBeforeRefresh = state.selectedDeviceId;
   const previousDevices = new Map(state.devices.map((device) => [device.id, device]));
   const activeDeviceId = state.selectedSessionId ? state.selectedDeviceId : null;
   try {
@@ -362,10 +368,12 @@ async function loadDevices() {
     if (!state.selectedDeviceId || !state.devices.some((device) => device.id === state.selectedDeviceId)) {
       state.selectedDeviceId = state.devices.find((device) => device.presence === "online")?.id || state.devices[0]?.id || null;
     }
+    if (selectedBeforeRefresh && state.selectedDeviceId !== selectedBeforeRefresh) state.pendingEnqueues.clear();
     if (state.controlSession && state.controlSession.deviceId !== state.selectedDeviceId) resetRemoteBrowser();
   } catch {
     state.devices = [];
     state.selectedDeviceId = null;
+    if (selectedBeforeRefresh) state.pendingEnqueues.clear();
   } finally {
     element("refreshDevicesButton").disabled = !state.activeOrgId;
   }
@@ -434,7 +442,10 @@ function renderDevices() {
       : "operations: none advertised";
     if (operations.length) operationNode.querySelector("code").textContent = operations.join(", ");
     item.addEventListener("click", () => {
-      if (state.selectedDeviceId !== device.id) resetRemoteBrowser();
+      if (state.selectedDeviceId !== device.id) {
+        resetRemoteBrowser();
+        state.pendingEnqueues.clear();
+      }
       state.selectedDeviceId = device.id;
       renderDevices();
       renderReadiness();
@@ -457,6 +468,25 @@ function readinessItems() {
 
 function selectedDevice() {
   return state.devices.find((device) => device.id === state.selectedDeviceId) || null;
+}
+
+function authenticatedOperationalScope() {
+  let serverOrigin;
+  try { serverOrigin = new URL(normalizeBaseUrl(baseUrlInput.value)).origin; } catch { return null; }
+  return state.user?.id && state.activeOrgId
+    ? { serverOrigin, accountId: state.user.id, organizationId: state.activeOrgId }
+    : null;
+}
+
+function selectedOperationalScope(deviceId, workspaceId, sessionId) {
+  const authenticated = authenticatedOperationalScope();
+  return authenticated ? { ...authenticated, deviceId, workspaceId, sessionId } : null;
+}
+
+function fenceAuthenticatedOperationalState() {
+  const authenticated = authenticatedOperationalScope();
+  if (authenticated) state.pendingEnqueues.fenceAuthentication(authenticated);
+  else state.pendingEnqueues.clear();
 }
 
 function dropEncryptedControlSession(controlSessionId) {
@@ -492,6 +522,7 @@ function resetRemoteBrowser() {
   state.remoteStreamState = "CLOSED";
   state.remoteConnectionEpoch = 0;
   state.controlBusy = false;
+  state.pendingEnqueues.setScope(null);
   state.encryptedSessions.clear();
   state.encryptedCommandAttempts.clear();
   if (prior?.id && state.token) void request(`/v1/desktop-control-sessions/${encodeURIComponent(prior.id)}`, { method: "DELETE" }).catch(() => undefined);
@@ -580,24 +611,48 @@ async function executeRemoteCommand(controlSession, operation, argumentsValue, g
       } : { schemaVersion: 1, operation, payloadVersion: 1, arguments: argumentsValue, idempotencyKey },
     });
   } catch (error) {
-    error.ambiguousMutation = isMutationOperation(operation);
+    const definitiveClientRejection = Number.isSafeInteger(error?.status) && error.status >= 400 && error.status < 500 &&
+      error?.code !== "idempotency_conflict";
+    error.ambiguousMutation = isMutationOperation(operation) && !definitiveClientRejection;
+    error.definitiveNonEnqueued = definitiveClientRejection;
     throw error;
   }
-  if (!created?.commandId) {
+  if (!created?.commandId || created.controlSessionId !== controlSession.id || created.deviceId !== controlSession.deviceId || created.idempotencyKey !== idempotencyKey) {
     const error = new Error("Command 创建响应无效");
     error.ambiguousMutation = isMutationOperation(operation);
     throw error;
   }
-  onCommand?.(created.commandId);
+  onCommand?.(created.commandId, created.controlSessionId);
   log("info", "command 已创建", { commandId: created.commandId, status: created.status });
   let terminal;
   try {
-    terminal = await waitForCommand(controlSession.id, created.commandId, generation);
+    terminal = await waitForCommand(created.controlSessionId, created.commandId, generation);
   } catch (error) {
     error.ambiguousMutation = isMutationOperation(operation);
     throw error;
   }
-  terminal = await decryptCommandTerminal(controlSession, operation, terminal);
+  return completeRemoteCommand(operation, created.controlSessionId, created.commandId, terminal);
+}
+
+async function completeRemoteCommand(operation, controlSessionId, commandId, terminal) {
+  const controlSession = {
+    id: controlSessionId,
+    deviceId: state.controlSession?.deviceId || selectedDevice()?.id,
+  };
+  const encryption = state.encryptedSessions.get(controlSessionId);
+  if (terminal?.payloadEncryption?.mode === "e2ee-v1" && !encryption) {
+    if (terminal.status === "succeeded") return { commandId, result: null, reconcile: true };
+    const error = new Error(terminal.controlSignal?.errorCode || `Command ${terminal.status}`);
+    if (typeof terminal.controlSignal?.errorCode === "string") error.code = terminal.controlSignal.errorCode;
+    error.safeTerminal = true;
+    throw error;
+  }
+  try {
+    terminal = await decryptCommandTerminal(controlSession, operation, terminal);
+  } catch (error) {
+    error.safeTerminal = true;
+    throw error;
+  }
   if (terminal.status !== "succeeded") {
     const error = new Error(terminal.error?.message || terminal.error?.code || `Command ${terminal.status}`);
     if (typeof terminal.error?.code === "string") error.code = terminal.error.code;
@@ -606,10 +661,15 @@ async function executeRemoteCommand(controlSession, operation, argumentsValue, g
   }
   if (terminal.result?.operation !== operation) {
     const error = new Error("Command terminal result operation is invalid");
-    error.ambiguousMutation = isMutationOperation(operation);
+    error.safeTerminal = true;
     throw error;
   }
-  return { commandId: created.commandId, result: terminal.result.result };
+  return { commandId, result: terminal.result.result, reconcile: false };
+}
+
+async function resumeRemoteCommand(operation, controlSessionId, commandId, generation) {
+  const terminal = await waitForCommand(controlSessionId, commandId, generation);
+  return completeRemoteCommand(operation, controlSessionId, commandId, terminal);
 }
 
 async function runSessionCreationCommand({ controlSession, arguments: argumentsValue, idempotencyKey, onCommand }) {
@@ -653,7 +713,7 @@ function applyRenewalEvent(event) {
   return result;
 }
 
-async function runRemoteOperation(operation, argumentsValue, scope, { selected = false, withCommand = false, idempotencyKey, onCommand } = {}) {
+async function runRemoteOperation(operation, argumentsValue, scope, { selected = false, withCommand = false, idempotencyKey, onCommand, resume = null } = {}) {
   if (state.controlBusy) throw new Error("已有远程读取正在进行");
   const device = selectedDevice();
   const ops = advertisedOperations(device);
@@ -666,7 +726,9 @@ async function runRemoteOperation(operation, argumentsValue, scope, { selected =
   try {
     const session = selected ? state.controlSession : (disposable = await openControlSession(scope));
     if (!session || generation !== state.controlGeneration) throw new Error("操作已取消");
-    const completed = await executeRemoteCommand(session, operation, argumentsValue, generation, idempotencyKey, onCommand);
+    const completed = resume
+      ? await resumeRemoteCommand(operation, resume.controlSessionId, resume.commandId, generation)
+      : await executeRemoteCommand(session, operation, argumentsValue, generation, idempotencyKey, onCommand);
     return withCommand ? completed : completed.result;
   } catch (error) {
     if (selected && isMutationOperation(operation)) {
@@ -713,7 +775,10 @@ async function loadRemoteWorkspaces() {
 
 async function selectRemoteWorkspace(workspaceId) {
   if (state.sessionCreationAttempt && state.selectedWorkspaceId !== workspaceId) return;
-  if (state.selectedWorkspaceId !== workspaceId) closeSelectedControlSession();
+  if (state.selectedWorkspaceId !== workspaceId) {
+    if (state.selectedWorkspaceId) state.pendingEnqueues.clear();
+    closeSelectedControlSession();
+  }
   state.selectedWorkspaceId = workspaceId;
   state.selectedSessionId = null;
   state.sessions = [];
@@ -810,6 +875,7 @@ async function selectRemoteSession(sessionId, { propagateFailure = false } = {})
     }
     return;
   }
+  if (state.selectedSessionId && state.selectedSessionId !== sessionId) state.pendingEnqueues.clear();
   if (state.controlSession && state.selectedSessionId !== sessionId) closeSelectedControlSession();
   state.selectedSessionId = sessionId;
   state.snapshot = null;
@@ -825,6 +891,7 @@ async function selectRemoteSession(sessionId, { propagateFailure = false } = {})
       return;
     }
     state.controlSession = controlSession;
+    state.pendingEnqueues.setScope(selectedOperationalScope(controlSession.deviceId, workspaceId, sessionId));
     state.controlRenewal = createRenewalState();
     state.remoteModel = createRemoteSessionState({ controlSessionId: controlSession.id, deviceId: controlSession.deviceId, workspaceId, sessionId });
     startSelectedStream(generation);
@@ -849,38 +916,99 @@ async function sendRemotePrompt() {
   if (!workspaceId || !sessionId) return;
   const prompt = element("promptInput").value.trim();
   const selectedWhenBusy = element("whenBusySelect").value;
-  const features = state.selectedDevice?.capabilities?.features || [];
-  const whenBusy = selectedWhenBusy === "steer" && features.includes("session.steer")
-    ? "steer"
-    : selectedWhenBusy === "enqueue" && features.includes("session.enqueue") ? "enqueue" : "reject";
+  const whenBusy = resolveBusyMode(selectedWhenBusy, selectedDevice());
   if (selectedWhenBusy !== whenBusy) {
     toast("Desktop 未独立声明该运行中会话能力");
     return;
   }
-  if (!prompt) return;
+  if (!validRemotePrompt(prompt)) {
+    toast("Prompt 必须为非空且不超过 200,000 UTF-8 字节");
+    return;
+  }
   element("sendPromptButton").disabled = true;
+  const priorAttempt = whenBusy === "enqueue" ? state.pendingEnqueues.attempt() : null;
+  const submission = whenBusy === "enqueue"
+    ? prepareEnqueueSubmission(priorAttempt, { createKey: () => crypto.randomUUID(), controlSessionId: state.controlSession?.id })
+    : { idempotencyKey: crypto.randomUUID(), resume: null, attempt: null };
+  const idempotencyKey = submission.idempotencyKey;
+  let commandId = submission.resume?.commandId || null;
+  let controlSessionId = submission.resume?.controlSessionId || state.controlSession?.id;
+  if (submission.attempt) state.pendingEnqueues.beginAttempt(submission.attempt);
   try {
-    const result = await runRemoteOperation("session.prompt", { workspaceId, sessionId, prompt, whenBusy }, { workspaceId, sessionId }, { selected: true });
-    if (result.disposition === "started") {
-      state.activeRunId = result.runId;
-      state.activeRunGeneration = result.generation;
-    } else {
-      const status = element("pendingOperationStatus");
-      status.classList.remove("hidden");
-      status.textContent = result.disposition === "enqueued"
-        ? `已在 Desktop 本机排队（位置 ${result.position}，ID ${result.pendingOperationId}）`
-        : `已 steer 当前运行（ID ${result.pendingOperationId}）`;
+    const result = await runRemoteOperation("session.prompt", { workspaceId, sessionId, prompt, whenBusy }, { workspaceId, sessionId }, {
+      selected: true,
+      withCommand: true,
+      idempotencyKey,
+      resume: submission.resume,
+      onCommand: (id, commandScopeId) => {
+        commandId = id;
+        controlSessionId = commandScopeId;
+        if (whenBusy === "enqueue") state.pendingEnqueues.setAttemptCommand(id, commandScopeId);
+      },
+    });
+    if (whenBusy === "enqueue") state.pendingEnqueues.clearAttempt();
+    if (result.reconcile) {
+      await requestSelectedRecovery("enqueue_attempt_recovered", state.controlGeneration, true);
+    } else if (result.result.disposition === "started") {
+      const admitted = result.result;
+      state.activeRunId = admitted.runId;
+      state.activeRunGeneration = admitted.generation;
+    } else if (result.result.disposition === "enqueued") {
+      const admitted = result.result;
+      state.pendingEnqueues.add({ id: admitted.pendingOperationId, mode: whenBusy, position: admitted.position, status: "pending" });
     }
     element("promptPanel").classList.add("hidden");
     element("promptInput").value = "";
-    log("success", "Prompt 已提交", { disposition: result.disposition, pendingOperationId: result.pendingOperationId || null });
-    toast(result.disposition === "enqueued" ? "Prompt 已在 Desktop 本机持久排队" : "Prompt 已提交到 Desktop");
+    log("success", "Prompt 已提交", { disposition: result.result?.disposition || "recovered", pendingOperationId: result.result?.pendingOperationId || null });
+    toast(result.result?.disposition === "enqueued" ? "Prompt 已在 Desktop 本机持久排队" : "Prompt 已提交到 Desktop");
   } catch (error) {
+    if (whenBusy === "enqueue" && error?.code === "idempotency_conflict") {
+      state.pendingEnqueues.clearAttempt();
+      try {
+        await requestSelectedRecovery("enqueue_attempt_idempotency_conflict", state.controlGeneration, true);
+        element("promptPanel").classList.add("hidden");
+        element("promptInput").value = "";
+        log("success", "已从重复排队提交恢复会话状态", { idempotencyKey });
+        toast("已恢复先前排队提交的会话状态");
+        return;
+      } catch (recoveryError) {
+        log("error", "排队提交已存在，但快照恢复失败", { message: recoveryError instanceof Error ? recoveryError.message : "unknown" });
+        toast("先前提交已被接受，但快照恢复失败");
+        return;
+      }
+    }
+    if (whenBusy === "enqueue" && (isDefinitiveEnqueueOutcome({ error }) || (!commandId && error?.ambiguousMutation !== true))) {
+      state.pendingEnqueues.clearAttempt();
+    }
+    if (whenBusy === "enqueue" && commandId) {
+      log("warning", "排队结果待恢复", { commandId, idempotencyKey });
+    }
     log("error", "Prompt 提交失败", { message: error instanceof Error ? error.message : "unknown" });
     toast(error instanceof Error ? error.message : "Prompt 提交失败");
   } finally {
     element("sendPromptButton").disabled = false;
     renderRemoteBrowser();
+  }
+}
+
+async function cancelPendingRemoteOperation(pendingOperationId) {
+  const pending = state.pendingEnqueues.list().find((item) => item.id === pendingOperationId);
+  if (!pending || !state.controlSession) return;
+  const workspaceId = state.selectedWorkspaceId;
+  const sessionId = state.selectedSessionId;
+  if (!workspaceId || !sessionId) return;
+  try {
+    const result = await runRemoteOperation("session.pending.cancel", {
+      workspaceId,
+      sessionId,
+      pendingOperationId: pending.id,
+    }, { workspaceId, sessionId }, { selected: true });
+    if (!["cancelled", "already_cancelled", "not_cancellable"].includes(result.status)) {
+      throw new Error("Desktop returned an invalid pending cancellation result");
+    }
+    state.pendingEnqueues.remove(pending.id);
+  } catch (error) {
+    toast(error instanceof Error ? error.message : "取消排队操作失败");
   }
 }
 
@@ -898,6 +1026,7 @@ function closeSelectedControlSession() {
   state.remoteStreamState = "CLOSED";
   state.remoteConnectionEpoch = 0;
   state.activeRunId = null;
+  state.pendingEnqueues.setScope(null);
   if (prior?.id && state.token) void request(`/v1/desktop-control-sessions/${encodeURIComponent(prior.id)}`, { method: "DELETE" }).catch(() => undefined);
 }
 
@@ -1040,6 +1169,12 @@ async function installSelectedSnapshot(snapshot, commandId, recovery, generation
   const result = establishRemoteSnapshotBaseline(state.remoteModel, snapshot, boundary.envelope, boundary.id, commandId);
   state.remoteModel = result.state;
   state.snapshot = result.state.snapshot;
+  state.pendingEnqueues.replace((snapshot.pendingOperations || []).map((pending) => ({
+    id: pending.id,
+    position: pending.position,
+    mode: pending.mode,
+    status: pending.status,
+  })));
   state.activeRunId = result.state.activeRun?.runId || null;
   renderSnapshot();
   const buffered = state.remoteEventBuffer.slice(boundaryIndex + 1);
@@ -1133,6 +1268,24 @@ function renderRemoteBrowser() {
   }
   const sendButton = element("sendPromptButton");
   if (sendButton) sendButton.disabled = unsafe || !state.selectedSessionId;
+  const pendingStatus = element("pendingOperationStatus");
+  const pendingHandles = state.pendingEnqueues.list();
+  pendingStatus.innerHTML = "";
+  pendingStatus.classList.toggle("hidden", pendingHandles.length === 0);
+  for (const pending of pendingHandles) {
+    const row = document.createElement("div");
+    row.className = "pending-operation-row";
+    const label = document.createElement("span");
+    label.textContent = `Desktop queue #${pending.position} · ${pending.id}`;
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "ghost";
+    cancel.textContent = "取消排队操作";
+    cancel.disabled = unsafe;
+    cancel.addEventListener("click", () => void cancelPendingRemoteOperation(pending.id));
+    row.append(label, cancel);
+    pendingStatus.append(row);
+  }
   const createButton = element("createSessionButton");
   let validTitle = false;
   try {
@@ -1440,6 +1593,7 @@ function renderNotificationPermission() {
 function logout() {
   void sessionCreation.disposeAndClear();
   resetRemoteBrowser();
+  state.pendingEnqueues.clear();
   state.token = null;
   state.user = null;
   state.organizations = [];

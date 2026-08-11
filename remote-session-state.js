@@ -86,16 +86,25 @@ function validateError(error, runId) {
   if (error.schemaVersion !== 1 || !id(error.code) || typeof error.message !== "string" || !error.message.trim() || typeof error.retryable !== "boolean" || !nullable(error.correlationId, id) || (Object.hasOwn(error, "currentRunId") && !nullable(error.currentRunId, (value) => id(value) && value === runId))) fail("Malformed run error");
 }
 
+function validatePendingOperation(operation) {
+  exact(operation, ["id", "mode", "position", "status"]);
+  if (!id(operation.id) || !new Set(["steer", "enqueue"]).has(operation.mode) ||
+      !Number.isSafeInteger(operation.position) || operation.position <= 0 || operation.status !== "pending") {
+    fail("Malformed pending operation");
+  }
+}
+
 function validateSnapshot(snapshot, scope) {
-  exact(snapshot, ["schemaVersion", "workspace", "session", "messages", "todos", "interactions", "capturedAt"]);
+  exact(snapshot, ["schemaVersion", "workspace", "session", "messages", "todos", "interactions", "pendingOperations", "capturedAt"]);
   exact(snapshot.workspace, ["id", "name"]);
   exact(snapshot.session, ["id", "workspaceId", "title", "status", "createdAt", "updatedAt", "activeRunId"]);
   if (snapshot.schemaVersion !== 1 || snapshot.workspace.id !== scope.workspaceId || typeof snapshot.workspace.name !== "string" || !snapshot.workspace.name.trim() || snapshot.session.id !== scope.sessionId || snapshot.session.workspaceId !== scope.workspaceId || typeof snapshot.session.title !== "string" || !snapshot.session.title.trim() || !SESSION_STATUSES.has(snapshot.session.status) || !date(snapshot.session.createdAt) || !date(snapshot.session.updatedAt) || !nullable(snapshot.session.activeRunId, id) || !date(snapshot.capturedAt)) fail("Malformed or cross-scope snapshot");
-  if (!Array.isArray(snapshot.messages) || snapshot.messages.length > 100_000 || !Array.isArray(snapshot.todos) || snapshot.todos.length > 10_000 || !Array.isArray(snapshot.interactions) || snapshot.interactions.length > 1_000) fail("Malformed snapshot collections");
-  if (!uniqueIds(snapshot.messages) || !uniqueIds(snapshot.todos) || !uniqueIds(snapshot.interactions)) fail("Duplicate snapshot identifiers");
+  if (!Array.isArray(snapshot.messages) || snapshot.messages.length > 100_000 || !Array.isArray(snapshot.todos) || snapshot.todos.length > 10_000 || !Array.isArray(snapshot.interactions) || snapshot.interactions.length > 1_000 || !Array.isArray(snapshot.pendingOperations) || snapshot.pendingOperations.length > 1_000) fail("Malformed snapshot collections");
+  if (!uniqueIds(snapshot.messages) || !uniqueIds(snapshot.todos) || !uniqueIds(snapshot.interactions) || !uniqueIds(snapshot.pendingOperations)) fail("Duplicate snapshot identifiers");
   snapshot.messages.forEach(validateMessage);
   snapshot.todos.forEach(validateTodo);
   snapshot.interactions.forEach((item) => validateInteraction(item, scope.sessionId));
+  snapshot.pendingOperations.forEach(validatePendingOperation);
 }
 
 export function createRemoteSessionState(scope) {

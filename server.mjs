@@ -23,6 +23,7 @@ const files = new Map([
   ["/remote-e2ee.js", ["remote-e2ee.js", "text/javascript; charset=utf-8"]],
   ["/e2ee-negotiation.js", ["e2ee-negotiation.js", "text/javascript; charset=utf-8"]],
   ["/remote-e2ee-envelope.js", ["remote-e2ee-envelope.js", "text/javascript; charset=utf-8"]],
+  ["/busy-session-state.js", ["busy-session-state.js", "text/javascript; charset=utf-8"]],
   ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
 ]);
 

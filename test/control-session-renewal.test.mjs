@@ -66,6 +66,24 @@ test("classifies session creation as a mutation with no automatic reauthenticati
   assert.equal(renewed.effects.includes("execute_mutation"), false);
 });
 
+test("classifies pending cancellation as a mutation with renewal and recreation safety", () => {
+  assert.equal(isMutationOperation("session.pending.cancel"), true);
+  const required = transitionRenewal(createRenewalState(), {
+    type: "command_failed",
+    operation: "session.pending.cancel",
+    errorCode: "control_session_reauthentication_required",
+  });
+  assert.equal(required.state.phase, "renew_required");
+  assert.equal(required.replayMutation, false);
+  const recreated = transitionRenewal(required.state, {
+    type: "command_failed",
+    operation: "session.pending.cancel",
+    errorCode: "control_session_closed",
+  });
+  assert.equal(recreated.state.phase, "recreating");
+  assert.equal(recreated.replayMutation, false);
+});
+
 test("expired or closed renewal decisions recreate instead of revive", () => {
   for (const errorCode of ["control_session_expired", "control_session_closed"]) {
     const result = transitionRenewal({ phase: "renewing", operation: "session.abort", attempts: 1 }, { type: "renew_failed", errorCode });
