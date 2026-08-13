@@ -1,4 +1,4 @@
-import { applyRemoteSessionEvent, createRemoteSessionState, establishRemoteSnapshotBaseline, RemoteStateError } from "./remote-session-state.js";
+import { applyRemoteSessionEvent, createRemoteSessionState, establishRemoteSnapshotBaseline, scheduleRemoteStateRecovery } from "./remote-session-state.js";
 import { createRemoteSessionStream } from "./remote-session-stream.js";
 import { controlSessionExpiry, createCloudRequestError, createRenewalState, isMutationOperation, transitionRenewal } from "./control-session-renewal.js";
 import { createBrowserNotificationController, notificationForDeviceTransition, notificationForRemoteEvent, notificationForStreamTransition } from "./remote-notifications.js";
@@ -12,6 +12,7 @@ import {
 import { immutableEncryptionBinding, negotiateEncryptedControlSession } from "./e2ee-negotiation.js";
 import { decryptControllerCommandTerminal, decryptControllerEventEnvelope } from "./remote-e2ee-envelope.js";
 import { createPendingEnqueueState, isDefinitiveEnqueueOutcome, prepareEnqueueSubmission, resolveBusyMode, validRemotePrompt } from "./busy-session-state.js";
+import { decideWorkspaceActivation } from "./workspace-selection.js";
 
 const DISABLED_GATES = Object.freeze({
   enrollment: false,
@@ -200,10 +201,15 @@ function openDeviceDetail(deviceId) {
     state.pendingEnqueues.clear();
   }
   state.selectedDeviceId = device.id;
+  state.workspaces = [];
+  state.sessions = [];
+  state.selectedWorkspaceId = null;
+  state.selectedSessionId = null;
   element("detailPageTitle").textContent = device.displayName || device.id;
   element("detailDeviceMeta").textContent = `${device.platform || "Desktop"} · app ${device.appVersion || "—"} · online`;
   showView("detail");
   renderReadiness();
+  void loadRemoteWorkspaces();
 }
 
 async function request(path, options = {}) {
@@ -803,6 +809,16 @@ async function loadRemoteWorkspaces() {
   renderRemoteBrowser();
 }
 
+function collapseRemoteWorkspace() {
+  closeSelectedControlSession();
+  state.selectedWorkspaceId = null;
+  state.selectedSessionId = null;
+  state.sessions = [];
+  state.snapshot = null;
+  renderRemoteBrowser();
+  renderSnapshot();
+}
+
 async function selectRemoteWorkspace(workspaceId) {
   if (state.sessionCreationAttempt && state.selectedWorkspaceId !== workspaceId) return;
   if (state.selectedWorkspaceId !== workspaceId) {
@@ -987,7 +1003,6 @@ async function sendRemotePrompt() {
       const admitted = result.result;
       state.pendingEnqueues.add({ id: admitted.pendingOperationId, mode: whenBusy, position: admitted.position, status: "pending" });
     }
-    element("promptPanel").classList.add("hidden");
     element("promptInput").value = "";
     log("success", "Prompt 已提交", { disposition: result.result?.disposition || "recovered", pendingOperationId: result.result?.pendingOperationId || null });
     toast(result.result?.disposition === "enqueued" ? "Prompt 已在 Desktop 本机持久排队" : "Prompt 已提交到 Desktop");
@@ -996,7 +1011,6 @@ async function sendRemotePrompt() {
       state.pendingEnqueues.clearAttempt();
       try {
         await requestSelectedRecovery("enqueue_attempt_idempotency_conflict", state.controlGeneration, true);
-        element("promptPanel").classList.add("hidden");
         element("promptInput").value = "";
         log("success", "已从重复排队提交恢复会话状态", { idempotencyKey });
         toast("已恢复先前排队提交的会话状态");
@@ -1176,11 +1190,14 @@ async function applySelectedEnvelope(envelope, sseId, generation) {
     applyRenderEffects(result.effects);
     if (result.effects.some((effect) => effect.type === "resync")) void requestSelectedRecovery("event_requested", generation);
   } catch (error) {
-    if (error instanceof RemoteStateError) {
-      if (!state.remoteRecovery) await requestSelectedRecovery(error.message, generation);
-      throw error;
+    if (scheduleRemoteStateRecovery(error, {
+      recoveryInFlight: Boolean(state.remoteRecovery),
+      requestRecovery: (reason) => requestSelectedRecovery(reason, generation),
+    })) {
+      log("info", "增量事件缺少安全基线，已切换到快照恢复", { reason: error.message });
+      return;
     }
-    else throw error;
+    throw error;
   }
 }
 
@@ -1229,15 +1246,22 @@ function requestSelectedRecovery(reason, generation, propagateFailure = false) {
   if (state.remoteRecovery) return state.remoteRecovery;
   state.remoteStreamState = "RESYNCING";
   renderRemoteBrowser();
-  state.remoteRecovery = refreshSelectedSnapshot(generation, true)
+  let recoveryPromise;
+  recoveryPromise = refreshSelectedSnapshot(generation, true)
     .catch((error) => {
       if (generation !== state.controlGeneration) return;
       log("error", "快照恢复失败", { reason, message: error.message });
       if (propagateFailure) throw error;
       void recreateSelectedControlSession(generation);
     })
-    .finally(() => { if (generation === state.controlGeneration) state.remoteRecovery = null; });
-  return state.remoteRecovery;
+    .finally(() => {
+      if (generation === state.controlGeneration && state.remoteRecovery === recoveryPromise) state.remoteRecovery = null;
+    });
+  // Publish the in-flight recovery before any command lifecycle can be
+  // consumed. Otherwise an immediate stream event can recursively start a
+  // second snapshot command for the same missing baseline.
+  state.remoteRecovery = recoveryPromise;
+  return recoveryPromise;
 }
 
 async function recreateSelectedControlSession(generation) {
@@ -1296,8 +1320,9 @@ function renderRemoteBrowser() {
       button.disabled = unsafe || !state.activeRunId || !operations.includes("session.abort");
     }
   }
+  const prompt = element("promptInput")?.value.trim() || "";
   const sendButton = element("sendPromptButton");
-  if (sendButton) sendButton.disabled = unsafe || !state.selectedSessionId;
+  if (sendButton) sendButton.disabled = unsafe || !state.selectedSessionId || !prompt;
   const pendingStatus = element("pendingOperationStatus");
   const pendingHandles = state.pendingEnqueues.list();
   pendingStatus.innerHTML = "";
@@ -1339,32 +1364,58 @@ function renderRemoteBrowser() {
   element("snapshotStatus").className = `stream-state ${state.remoteStreamState.toLowerCase()}`;
   renderControlSessionStatus(expiry);
 
+  const stage = element("sessionStage");
+  stage.classList.toggle("hidden", !state.selectedSessionId);
+  element("sessionStageTitle").textContent = state.sessions.find((session) => session.id === state.selectedSessionId)?.title || "Session";
+  element("sessionStageMeta").textContent = state.selectedSessionId
+    ? `${state.workspaces.find((workspace) => workspace.id === state.selectedWorkspaceId)?.name || "Workspace"} · ${state.remoteStreamState.toLowerCase()}`
+    : "—";
+
   const workspaces = element("workspaceList");
   workspaces.innerHTML = "";
-  if (!state.workspaces.length) workspaces.innerHTML = `<div class="browser-empty ${state.controlBusy ? "browser-loading" : ""}">${state.controlBusy ? "正在读取 Desktop…" : "点击 workspace.list 读取远程可见工作区"}</div>`;
+  if (!state.workspaces.length) workspaces.innerHTML = `<div class="browser-empty ${state.controlBusy ? "browser-loading" : ""}">${state.controlBusy ? "正在读取 Desktop 工作区…" : "当前 Desktop 没有可见工作区"}</div>`;
   for (const workspace of state.workspaces) {
+    const expanded = workspace.id === state.selectedWorkspaceId;
+    const group = document.createElement("section");
+    group.className = `workspace-group ${expanded ? "expanded" : ""}`;
     const button = document.createElement("button");
-    button.className = `browser-item ${workspace.id === state.selectedWorkspaceId ? "selected" : ""}`;
-    button.innerHTML = "<strong></strong><small></small>";
+    button.type = "button";
+    button.className = "workspace-row";
+    button.setAttribute("aria-expanded", String(expanded));
+    button.innerHTML = '<span class="workspace-chevron">›</span><span class="workspace-icon">⌘</span><span class="workspace-copy"><strong></strong><small></small></span><span class="workspace-session-total"></span>';
     button.querySelector("strong").textContent = workspace.name;
     button.querySelector("small").textContent = workspace.id;
+    button.querySelector(".workspace-session-total").textContent = expanded && state.sessions.length ? `${state.sessions.length}` : "";
     button.disabled = creationActive;
-    button.addEventListener("click", () => void selectRemoteWorkspace(workspace.id));
-    workspaces.append(button);
-  }
-
-  const sessions = element("sessionList");
-  sessions.innerHTML = "";
-  if (!state.sessions.length) sessions.innerHTML = `<div class="browser-empty ${state.controlBusy ? "browser-loading" : ""}">${state.selectedWorkspaceId ? "此工作区暂无会话或正在读取" : "选择工作区后读取会话"}</div>`;
-  for (const session of state.sessions) {
-    const button = document.createElement("button");
-    button.className = `browser-item ${session.id === state.selectedSessionId ? "selected" : ""}`;
-    button.innerHTML = "<strong></strong><small></small>";
-    button.querySelector("strong").textContent = session.title;
-    button.querySelector("small").textContent = `${session.status} · ${new Date(session.updatedAt).toLocaleString("zh-CN")}`;
-    button.disabled = creationActive;
-    button.addEventListener("click", () => void selectRemoteSession(session.id));
-    sessions.append(button);
+    button.addEventListener("click", () => {
+      const action = decideWorkspaceActivation({ selectedWorkspaceId: state.selectedWorkspaceId, requestedWorkspaceId: workspace.id, controlBusy: state.controlBusy });
+      if (action === "collapse") {
+        collapseRemoteWorkspace();
+        return;
+      }
+      if (action === "ignore") return;
+      void selectRemoteWorkspace(workspace.id);
+    });
+    group.append(button);
+    if (expanded) {
+      const sessions = document.createElement("div");
+      sessions.className = "workspace-sessions";
+      if (!state.sessions.length) sessions.innerHTML = `<div class="workspace-sessions-empty ${state.controlBusy ? "browser-loading" : ""}">${state.controlBusy ? "正在读取 Sessions…" : "此工作区暂无 Session"}</div>`;
+      for (const session of state.sessions) {
+        const sessionButton = document.createElement("button");
+        sessionButton.type = "button";
+        sessionButton.className = `session-row ${session.id === state.selectedSessionId ? "selected" : ""}`;
+        sessionButton.innerHTML = '<span class="session-row-line"></span><span class="session-row-copy"><strong></strong><small></small></span><span class="session-row-state"></span>';
+        sessionButton.querySelector("strong").textContent = session.title || "Untitled session";
+        sessionButton.querySelector("small").textContent = new Date(session.updatedAt).toLocaleString("zh-CN", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+        sessionButton.querySelector(".session-row-state").textContent = session.status || "idle";
+        sessionButton.disabled = creationActive;
+        sessionButton.addEventListener("click", () => void selectRemoteSession(session.id));
+        sessions.append(sessionButton);
+      }
+      group.append(sessions);
+    }
+    workspaces.append(group);
   }
 }
 
@@ -1427,15 +1478,11 @@ function renderSnapshot() {
   const snapshot = state.snapshot;
   const model = state.remoteModel;
   if (!snapshot) {
-    root.innerHTML = `<div class="browser-empty ${state.controlBusy ? "browser-loading" : ""}">${state.controlBusy ? "正在等待 Desktop 快照…" : "选择会话后读取只读快照"}</div>`;
+    root.innerHTML = `<div class="browser-empty ${state.controlBusy ? "browser-loading" : ""}">${state.controlBusy ? "正在等待 Desktop 会话历史…" : "选择 Session 后查看会话"}</div>`;
     return;
   }
-  const header = document.createElement("div");
-  header.className = "snapshot-header";
-  header.innerHTML = "<strong></strong><span></span>";
-  header.querySelector("strong").textContent = snapshot.session?.title || "Session";
-  header.querySelector("span").textContent = `${snapshot.workspace?.name || "Workspace"} · captured ${new Date(snapshot.capturedAt).toLocaleString("zh-CN")}`;
-  root.append(header);
+  element("sessionStageTitle").textContent = snapshot.session?.title || "Session";
+  element("sessionStageMeta").textContent = `${snapshot.workspace?.name || "Workspace"} · ${new Date(snapshot.capturedAt).toLocaleString("zh-CN")}`;
   const summary = document.createElement("div");
   summary.className = "session-summary";
   summary.dataset.section = "status";
@@ -1444,9 +1491,8 @@ function renderSnapshot() {
   const messagesSection = document.createElement("section");
   messagesSection.className = "snapshot-section";
   messagesSection.dataset.section = "messages";
-  messagesSection.innerHTML = `<strong>Messages · <span></span></strong><div class="message-list"></div>`;
+  messagesSection.innerHTML = `<div class="history-marker"><span></span>Conversation history<span></span></div><div class="message-list"></div>`;
   const messageIds = model?.messageOrder || snapshot.messages.map((message) => message.id);
-  messagesSection.querySelector("strong span").textContent = String(messageIds.length);
   for (const messageId of messageIds) messagesSection.querySelector(".message-list").append(createMessageNode(model?.messages.get(messageId) || snapshot.messages.find((message) => message.id === messageId)));
   root.append(messagesSection);
   const todos = document.createElement("section");
@@ -1478,11 +1524,11 @@ function createPartNode(part) {
 
 function createMessageNode(message) {
   const article = document.createElement("article");
-  article.className = "message";
+  article.className = `message message-${message.role}`;
   article.dataset.messageId = domKey(message.id);
   const role = document.createElement("div");
   role.className = "message-role";
-  role.textContent = message.role;
+  role.textContent = message.role === "user" ? "You" : "JuggleWork";
   article.append(role);
   for (const part of message.parts) article.append(createPartNode(part));
   return article;
@@ -1679,6 +1725,13 @@ function wireEvents() {
   element("logoutButton").addEventListener("click", logout);
   element("deviceLogoutButton").addEventListener("click", logout);
   element("backToDevicesButton").addEventListener("click", showDeviceList);
+  element("closeSessionButton").addEventListener("click", () => {
+    closeSelectedControlSession();
+    state.selectedSessionId = null;
+    state.snapshot = null;
+    renderRemoteBrowser();
+    renderSnapshot();
+  });
   element("organization").addEventListener("change", () => void selectOrganization());
   element("refreshPolicyButton").addEventListener("click", () => void loadPolicy());
   element("refreshDevicesButton").addEventListener("click", () => void loadDevices());
@@ -1701,7 +1754,10 @@ function wireEvents() {
       });
       return;
     }
-    void selectRemoteWorkspace(state.selectedWorkspaceId);
+    void refreshRemoteSessions(state.selectedWorkspaceId).catch((error) => {
+      log("error", "session.list 刷新失败", { message: error instanceof Error ? error.message : "unknown" });
+      toast(error instanceof Error ? error.message : "读取会话失败");
+    });
   });
   document.querySelector('[data-operation="session.create"]').addEventListener("click", () => {
     element("createSessionForm").classList.remove("hidden");
@@ -1710,13 +1766,18 @@ function wireEvents() {
   document.querySelector('[data-operation="session.snapshot"]').addEventListener("click", () => state.selectedSessionId && void selectRemoteSession(state.selectedSessionId));
   document.querySelector('[data-operation="session.prompt"]').addEventListener("click", () => {
     if (!state.selectedSessionId) return;
-    element("promptPanel").classList.remove("hidden");
     element("promptInput").focus();
   });
   document.querySelector('[data-operation="session.abort"]').addEventListener("click", () => state.activeRunId && void abortRemoteRun());
   element("cancelPromptButton").addEventListener("click", () => {
-    element("promptPanel").classList.add("hidden");
     element("promptInput").value = "";
+    renderRemoteBrowser();
+  });
+  element("promptInput").addEventListener("input", renderRemoteBrowser);
+  element("promptInput").addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
+    event.preventDefault();
+    if (!element("sendPromptButton").disabled) void sendRemotePrompt();
   });
   element("sendPromptButton").addEventListener("click", () => void sendRemotePrompt());
   element("createSessionForm").addEventListener("submit", (event) => void createRemoteSession(event));

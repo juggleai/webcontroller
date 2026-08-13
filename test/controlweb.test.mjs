@@ -22,6 +22,13 @@ test("serves the diagnostic page with restrictive browser headers", async (conte
   assert.match(page, /组织与策略/);
   assert.match(page, /控制链路就绪度/);
   assert.match(page, /诊断日志/);
+  assert.ok(page.indexOf("控制链路就绪度") < page.indexOf("Cloud 连接"));
+  assert.match(page, /id="workspaceList"/);
+  assert.match(page, /id="sessionStage"/);
+  assert.match(page, /class="conversation-history snapshot"/);
+  assert.match(page, /class="conversation-composer"/);
+  assert.doesNotMatch(page, /<strong>Sessions<\/strong>/);
+  assert.doesNotMatch(page, /<strong>Session snapshot<\/strong>/);
   assert.match(page, /data-operation="session\.create"/);
   assert.match(page, /id="createSessionForm"/);
   assert.doesNotMatch(page, /id="sessionTitleInput"[^>]*maxlength=/);
@@ -44,7 +51,7 @@ test("serves the DOM-free remote control modules", async (context) => {
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   context.after(() => server.close());
   const address = server.address();
-  for (const asset of ["sse.js", "remote-session-state.js", "remote-session-stream.js", "control-session-renewal.js", "remote-notifications.js", "remote-e2ee.js", "e2ee-negotiation.js", "remote-e2ee-envelope.js", "session-creation.js", "busy-session-state.js"]) {
+  for (const asset of ["sse.js", "remote-session-state.js", "remote-session-stream.js", "control-session-renewal.js", "remote-notifications.js", "remote-e2ee.js", "e2ee-negotiation.js", "remote-e2ee-envelope.js", "session-creation.js", "busy-session-state.js", "workspace-selection.js"]) {
     const response = await fetch(`http://127.0.0.1:${address.port}/${asset}`);
     assert.equal(response.status, 200);
     assert.match(response.headers.get("content-type"), /javascript/);

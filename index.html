@@ -107,11 +107,80 @@
             <button class="ghost notification-button" id="notificationButton" type="button">启用安全通知</button>
           </section>
 
+          <section class="card control-card">
+            <div class="card-heading">
+              <div>
+                <span class="module-index">01</span>
+                <div><span class="module-kicker">CONTROL PLANE</span><h2>控制链路就绪度</h2></div>
+              </div>
+              <span class="badge neutral" id="controlBadge">不可用</span>
+            </div>
+            <div class="readiness" id="readiness"></div>
+            <div class="workspace-browser" id="remoteBrowser">
+              <div class="workspace-browser-heading">
+                <div><span class="module-kicker">REMOTE CONTENT</span><strong>WORKSPACES</strong></div>
+                <span id="workspaceCount">0</span>
+              </div>
+              <div class="workspace-tree" id="workspaceList"><div class="browser-empty">正在读取当前 Desktop 的工作区</div></div>
+            </div>
+            <form class="create-session-panel hidden" id="createSessionForm">
+              <label>
+                <span>New empty session title</span>
+                <input id="sessionTitleInput" aria-describedby="sessionTitleLimit createSessionGuidance" placeholder="Title only; prompt is sent separately" />
+                <small id="sessionTitleLimit">Maximum 120 Unicode code points. Control characters are not allowed.</small>
+              </label>
+              <div class="button-row">
+                <button class="primary" id="createSessionButton" type="submit" disabled>Create empty session</button>
+                <button class="ghost" id="cancelCreateSessionButton" type="button">Cancel</button>
+              </div>
+              <p class="mutation-guidance hidden" id="createSessionGuidance" role="status"></p>
+            </form>
+            <div class="control-session-status hidden" id="controlSessionStatus" role="status">
+              <div><strong id="controlSessionStatusTitle">Control session active</strong><span id="controlSessionStatusDetail"></span></div>
+              <button class="ghost hidden" id="renewControlSessionButton" type="button">Renew session</button>
+            </div>
+            <div class="session-stage hidden" id="sessionStage">
+              <header class="session-stage-header">
+                <button class="session-close" id="closeSessionButton" type="button" aria-label="关闭会话"><span aria-hidden="true">←</span></button>
+                <div><strong id="sessionStageTitle">Session</strong><span id="sessionStageMeta">—</span></div>
+              <div class="session-stage-actions">
+                <span id="snapshotStatus">—</span>
+                  <button class="ghost session-abort-button" type="button" disabled data-operation="session.abort">停止</button>
+                </div>
+              </header>
+              <div class="conversation-history snapshot" id="snapshot"><div class="browser-empty">正在读取会话历史</div></div>
+              <div class="conversation-composer" id="promptPanel">
+                <div class="composer-status hidden" id="pendingOperationStatus" role="status"></div>
+                <textarea id="promptInput" rows="3" aria-label="消息" placeholder="Ask anything, use @ to mention…"></textarea>
+                <div class="composer-footer">
+                  <div class="busy-mode">
+                    <span class="composer-model">Desktop</span>
+                    <select id="whenBusySelect" aria-label="会话忙碌时">
+                      <option value="reject">忙碌时拒绝</option>
+                      <option value="steer">Steer 当前运行</option>
+                      <option value="enqueue">本机持久排队</option>
+                    </select>
+                  </div>
+                  <button class="composer-send" id="sendPromptButton" type="button" disabled aria-label="发送消息"><span aria-hidden="true">↑</span></button>
+                </div>
+              </div>
+            </div>
+            <div class="command-buttons utility-operations" aria-hidden="true">
+              <button type="button" disabled data-operation="workspace.list">workspace.list</button>
+              <button type="button" disabled data-operation="session.list">session.list</button>
+              <button type="button" disabled data-operation="session.create" class="create-btn">session.create</button>
+              <button type="button" disabled data-operation="session.snapshot">session.snapshot</button>
+              <button type="button" disabled data-operation="session.prompt" class="prompt-btn">session.prompt</button>
+            </div>
+            <span class="hidden" id="sessionCount">0</span>
+            <button class="hidden" id="cancelPromptButton" type="button">取消</button>
+          </section>
+
           <div class="detail-grid">
             <section class="card connection-card">
               <div class="card-heading">
                 <div>
-                  <span class="module-index">01</span>
+                  <span class="module-index">02</span>
                   <div><span class="module-kicker">NETWORK</span><h2>Cloud 连接</h2></div>
                 </div>
                 <button class="ghost" id="healthButton" type="button">重新检测</button>
@@ -134,7 +203,7 @@
             <section class="card policy-card">
               <div class="card-heading">
                 <div>
-                  <span class="module-index">02</span>
+                  <span class="module-index">03</span>
                   <div><span class="module-kicker">ACCESS</span><h2>组织与策略</h2></div>
                 </div>
                 <button class="ghost" id="refreshPolicyButton" type="button" disabled>刷新</button>
@@ -150,77 +219,6 @@
               <div class="gate-list" id="gateList"></div>
             </section>
           </div>
-
-          <section class="card control-card">
-            <div class="card-heading">
-              <div>
-                <span class="module-index">03</span>
-                <div><span class="module-kicker">CONTROL PLANE</span><h2>控制链路就绪度</h2></div>
-              </div>
-              <span class="badge neutral" id="controlBadge">不可用</span>
-            </div>
-            <div class="readiness" id="readiness"></div>
-            <div class="command-panel">
-              <div class="command-copy">
-                <strong>Read-only smoke test</strong>
-                <p>Discovery 使用一次性 session；选定 workspace/session 后复用一个最小 scope control session。</p>
-              </div>
-              <div class="command-buttons">
-                <button type="button" disabled data-operation="workspace.list">workspace.list</button>
-                <button type="button" disabled data-operation="session.list">session.list</button>
-                <button type="button" disabled data-operation="session.create" class="create-btn">session.create</button>
-                <button type="button" disabled data-operation="session.snapshot">session.snapshot</button>
-                <button type="button" disabled data-operation="session.prompt" class="prompt-btn">session.prompt</button>
-                <button type="button" disabled data-operation="session.abort" class="abort-btn">session.abort</button>
-              </div>
-            </div>
-            <form class="create-session-panel hidden" id="createSessionForm">
-              <label>
-                <span>New empty session title</span>
-                <input id="sessionTitleInput" aria-describedby="sessionTitleLimit createSessionGuidance" placeholder="Title only; prompt is sent separately" />
-                <small id="sessionTitleLimit">Maximum 120 Unicode code points. Control characters are not allowed.</small>
-              </label>
-              <div class="button-row">
-                <button class="primary" id="createSessionButton" type="submit" disabled>Create empty session</button>
-                <button class="ghost" id="cancelCreateSessionButton" type="button">Cancel</button>
-              </div>
-              <p class="mutation-guidance hidden" id="createSessionGuidance" role="status"></p>
-            </form>
-            <div class="control-session-status hidden" id="controlSessionStatus" role="status">
-              <div><strong id="controlSessionStatusTitle">Control session active</strong><span id="controlSessionStatusDetail"></span></div>
-              <button class="ghost hidden" id="renewControlSessionButton" type="button">Renew session</button>
-            </div>
-            <div class="prompt-panel hidden" id="promptPanel">
-              <label><span>Prompt</span><textarea id="promptInput" rows="3" placeholder="输入要发送到 Desktop 的 prompt"></textarea></label>
-              <label>
-                <span>会话忙碌时</span>
-                <select id="whenBusySelect">
-                  <option value="reject">拒绝（默认）</option>
-                  <option value="steer">Steer 当前运行</option>
-                  <option value="enqueue">本机持久排队</option>
-                </select>
-              </label>
-              <div class="button-row">
-                <button class="primary" id="sendPromptButton" type="button" disabled>发送 Prompt</button>
-                <button class="ghost" id="cancelPromptButton" type="button">取消</button>
-              </div>
-              <div class="mutation-guidance hidden" id="pendingOperationStatus" role="status"></div>
-            </div>
-            <div class="remote-browser" id="remoteBrowser">
-              <div class="browser-pane">
-                <div class="browser-pane-heading"><strong>Workspaces</strong><span id="workspaceCount">0</span></div>
-                <div class="browser-list" id="workspaceList"><div class="browser-empty">读取当前 Desktop 的工作区</div></div>
-              </div>
-              <div class="browser-pane">
-                <div class="browser-pane-heading"><strong>Sessions</strong><span id="sessionCount">0</span></div>
-                <div class="browser-list" id="sessionList"><div class="browser-empty">选择工作区后读取会话</div></div>
-              </div>
-              <div class="browser-pane transcript-pane">
-                <div class="browser-pane-heading"><strong>Session snapshot</strong><span id="snapshotStatus">—</span></div>
-                <div class="snapshot" id="snapshot"><div class="browser-empty">选择会话后读取只读快照</div></div>
-              </div>
-            </div>
-          </section>
 
           <section class="card log-card">
             <div class="card-heading">

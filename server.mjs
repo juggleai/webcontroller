@@ -24,6 +24,7 @@ const files = new Map([
   ["/e2ee-negotiation.js", ["e2ee-negotiation.js", "text/javascript; charset=utf-8"]],
   ["/remote-e2ee-envelope.js", ["remote-e2ee-envelope.js", "text/javascript; charset=utf-8"]],
   ["/busy-session-state.js", ["busy-session-state.js", "text/javascript; charset=utf-8"]],
+  ["/workspace-selection.js", ["workspace-selection.js", "text/javascript; charset=utf-8"]],
   ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
 ]);
 

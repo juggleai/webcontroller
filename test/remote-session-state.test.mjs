@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { applyRemoteSessionEvent, createRemoteSessionState, establishRemoteSnapshotBaseline, installRemoteSnapshot, RemoteStateError } from "../remote-session-state.js";
+import { applyRemoteSessionEvent, createRemoteSessionState, establishRemoteSnapshotBaseline, installRemoteSnapshot, RemoteStateError, scheduleRemoteStateRecovery } from "../remote-session-state.js";
 
 const scope = { controlSessionId: "11111111-1111-4111-8111-111111111111", deviceId: "22222222-2222-4222-8222-222222222222", workspaceId: "workspace_1", sessionId: "session_1" };
 const now = "2026-08-09T00:00:00.000Z";
@@ -60,6 +60,38 @@ test("does not commit cursor or sequence when application fails", () => {
   assert.equal(state.cursor, null);
   assert.equal(state.sequence, 0);
   assert.throws(() => applyRemoteSessionEvent(state, event(1, 4, { type: "unknown" }), "4"), /Unknown/);
+});
+
+test("schedules snapshot recovery without awaiting the serialized SSE consumer", async () => {
+  let missingParent;
+  try {
+    applyRemoteSessionEvent(installed(), event(1, 4, { type: "message.part.upsert", messageId: "missing", part }), "4");
+    assert.fail("missing parent update should fail");
+  } catch (error) {
+    assert.ok(error instanceof RemoteStateError);
+    missingParent = error;
+  }
+  let release;
+  let requestedReason = null;
+  const pending = new Promise((resolve) => { release = resolve; });
+  const handled = scheduleRemoteStateRecovery(missingParent, {
+    requestRecovery(reason) {
+      requestedReason = reason;
+      return pending;
+    },
+  });
+  assert.equal(handled, true);
+  assert.equal(requestedReason, "Message part parent is missing");
+  release();
+  await pending;
+
+  let duplicateCalls = 0;
+  assert.equal(scheduleRemoteStateRecovery(missingParent, {
+    recoveryInFlight: true,
+    requestRecovery() { duplicateCalls += 1; },
+  }), true);
+  assert.equal(duplicateCalls, 0);
+  assert.equal(scheduleRemoteStateRecovery(new Error("ordinary"), { requestRecovery() {} }), false);
 });
 
 test("terminal status for an old run cannot clear a newer active run", () => {

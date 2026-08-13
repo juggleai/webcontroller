@@ -13,6 +13,19 @@ export class RemoteStateError extends Error {
   }
 }
 
+export function scheduleRemoteStateRecovery(error, { recoveryInFlight = false, requestRecovery } = {}) {
+  if (!(error instanceof RemoteStateError)) return false;
+  if (!recoveryInFlight) {
+    if (typeof requestRecovery !== "function") throw new TypeError("requestRecovery must be a function");
+    // Recovery must be scheduled, not awaited by the current SSE record
+    // handler. The snapshot command's lifecycle boundary arrives on that same
+    // serialized stream, so awaiting here would prevent the boundary from ever
+    // being consumed and force an unnecessary session recreation.
+    void requestRecovery(error.message);
+  }
+  return true;
+}
+
 function fail(message) { throw new RemoteStateError(message); }
 function object(value) { return value !== null && typeof value === "object" && !Array.isArray(value); }
 function exact(value, keys) {
