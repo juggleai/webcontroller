@@ -13,7 +13,15 @@ test("serves the diagnostic page with restrictive browser headers", async (conte
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-security-policy"), /default-src 'self'/);
   const page = await response.text();
-  assert.match(page, /远程控制诊断台/);
+  assert.match(page, /连接你的 Desktop/);
+  assert.match(page, /id="loginView"/);
+  assert.match(page, /class="[^"]*hidden[^"]*" id="deviceView"/);
+  assert.match(page, /class="[^"]*hidden[^"]*" id="detailView"/);
+  assert.match(page, /选择一台 Desktop/);
+  assert.match(page, /Cloud 连接/);
+  assert.match(page, /组织与策略/);
+  assert.match(page, /控制链路就绪度/);
+  assert.match(page, /诊断日志/);
   assert.match(page, /data-operation="session\.create"/);
   assert.match(page, /id="createSessionForm"/);
   assert.doesNotMatch(page, /id="sessionTitleInput"[^>]*maxlength=/);

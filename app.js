@@ -175,6 +175,37 @@ function toast(message) {
   window.setTimeout(() => node.classList.remove("show"), 1800);
 }
 
+function showView(name) {
+  const views = {
+    login: element("loginView"),
+    devices: element("deviceView"),
+    detail: element("detailView"),
+  };
+  for (const [key, node] of Object.entries(views)) node?.classList.toggle("hidden", key !== name);
+  document.body.dataset.view = name;
+  window.scrollTo(0, 0);
+}
+
+function showDeviceList() {
+  resetRemoteBrowser();
+  showView("devices");
+  renderDevices();
+}
+
+function openDeviceDetail(deviceId) {
+  const device = state.devices.find((item) => item.id === deviceId);
+  if (!device || device.presence !== "online") return;
+  if (state.selectedDeviceId !== device.id) {
+    resetRemoteBrowser();
+    state.pendingEnqueues.clear();
+  }
+  state.selectedDeviceId = device.id;
+  element("detailPageTitle").textContent = device.displayName || device.id;
+  element("detailDeviceMeta").textContent = `${device.platform || "Desktop"} · app ${device.appVersion || "—"} · online`;
+  showView("detail");
+  renderReadiness();
+}
+
 async function request(path, options = {}) {
   const headers = new Headers({ Accept: "application/json", ...(options.headers || {}) });
   if (state.token) headers.set("Authorization", `Bearer ${state.token}`);
@@ -244,12 +275,16 @@ async function checkCloud() {
     element("cloudPulse").className = `pulse ${response.ok ? "online" : "error"}`;
     element("cloudLabel").textContent = response.ok ? "Cloud 可访问" : "Cloud 异常";
     element("cloudDetail").textContent = origin;
+    element("loginCloudDot").className = `status-dot ${response.ok ? "online" : "error"}`;
+    element("loginCloudStatus").textContent = response.ok ? "Cloud 已连接" : "Cloud 响应异常";
   } catch (error) {
     metric(0, "FAILED", "bad");
     metric(1, "FAILED", "bad");
     metric(2, "UNKNOWN", "bad");
     element("cloudPulse").className = "pulse error";
     element("cloudLabel").textContent = "连接失败";
+    element("loginCloudDot").className = "status-dot error";
+    element("loginCloudStatus").textContent = "Cloud 连接失败";
     log("error", "Cloud 检测失败", { message: error instanceof Error ? error.message : "unknown" });
   } finally {
     element("healthButton").disabled = false;
@@ -275,10 +310,9 @@ async function login(event) {
     state.user = payload.user || null;
     passwordNode.value = "";
     setBadge(element("authBadge"), state.user?.name || state.user?.account || "已登录", "good");
-    element("loginButton").classList.add("hidden");
-    element("logoutButton").classList.remove("hidden");
     log("success", "登录成功，token 已保存在页面内存");
     await loadOrganizations();
+    showView("devices");
   } catch (error) {
     state.token = null;
     setBadge(element("authBadge"), "登录失败", "bad");
@@ -397,6 +431,9 @@ function renderPolicy() {
 
 function renderDevices() {
   deviceList.innerHTML = "";
+  const onlineCount = state.devices.filter((device) => device.presence === "online").length;
+  element("onlineDeviceCount").textContent = String(onlineCount);
+  element("totalDeviceCount").textContent = `${state.devices.length} 台设备`;
   if (state.devices.length === 0) {
     deviceList.innerHTML = `<div class="empty-state"><div class="radar"></div><strong>未发现 Desktop 设备</strong><span>设备可能尚未注册，或不属于当前组织</span></div>`;
     return;
@@ -404,9 +441,9 @@ function renderDevices() {
   for (const device of state.devices) {
     const item = document.createElement("button");
     item.type = "button";
-    item.className = `device ${device.id === state.selectedDeviceId ? "selected" : ""}`;
+    item.className = `device ${device.presence || "offline"}`;
     item.dataset.deviceId = device.id;
-    item.disabled = Boolean(state.sessionCreationAttempt);
+    item.disabled = Boolean(state.sessionCreationAttempt) || device.presence !== "online";
     const operations = Array.isArray(device.capabilities?.operations)
       ? device.capabilities.operations.map((entry) => entry.operation)
       : [];
@@ -419,7 +456,8 @@ function renderDevices() {
         <span class="badge ${device.presence === "online" ? "good" : device.presence === "stale" ? "warn" : "neutral"}"></span>
       </div>
       <div class="device-meta"></div>
-      <div class="device-operations"></div>`;
+      <div class="device-operations"></div>
+      <div class="device-enter"><span>${device.presence === "online" ? "打开控制台" : "当前不可用"}</span><span aria-hidden="true">→</span></div>`;
     item.querySelector("strong").textContent = device.displayName || device.id;
     item.querySelector("small").textContent = device.id;
     item.querySelector(".badge").textContent = String(device.presence || "offline").toUpperCase();
@@ -441,15 +479,7 @@ function renderDevices() {
       ? `operations: <code></code>`
       : "operations: none advertised";
     if (operations.length) operationNode.querySelector("code").textContent = operations.join(", ");
-    item.addEventListener("click", () => {
-      if (state.selectedDeviceId !== device.id) {
-        resetRemoteBrowser();
-        state.pendingEnqueues.clear();
-      }
-      state.selectedDeviceId = device.id;
-      renderDevices();
-      renderReadiness();
-    });
+    item.addEventListener("click", () => openDeviceDetail(device.id));
     deviceList.append(item);
   }
 }
@@ -1607,12 +1637,12 @@ function logout() {
   element("refreshPolicyButton").disabled = true;
   element("refreshDevicesButton").disabled = true;
   element("loginButton").classList.remove("hidden");
-  element("logoutButton").classList.add("hidden");
   setBadge(element("authBadge"), "未登录", "neutral");
   renderPolicy();
   renderDevices();
   renderReadiness();
   log("info", "本地登录状态已清除");
+  showView("login");
 }
 
 function report() {
@@ -1647,6 +1677,8 @@ function wireEvents() {
   baseUrlInput.addEventListener("change", () => { logout(); void checkCloud(); });
   element("loginForm").addEventListener("submit", login);
   element("logoutButton").addEventListener("click", logout);
+  element("deviceLogoutButton").addEventListener("click", logout);
+  element("backToDevicesButton").addEventListener("click", showDeviceList);
   element("organization").addEventListener("change", () => void selectOrganization());
   element("refreshPolicyButton").addEventListener("click", () => void loadPolicy());
   element("refreshDevicesButton").addEventListener("click", () => void loadDevices());

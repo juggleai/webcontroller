@@ -4,66 +4,25 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark" />
-    <title>JuggleWork Desktop 远程控制诊断台</title>
+    <meta name="description" content="连接并诊断 JuggleWork Desktop 远程控制链路。" />
+    <title>JuggleWork Desktop 控制台</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
+    <a class="skip-link" href="#mainContent">跳到主要内容</a>
     <div class="ambient ambient-one"></div>
     <div class="ambient ambient-two"></div>
-    <main class="shell">
-      <header class="hero">
-        <div>
-          <div class="eyebrow">LOCAL CONTROL LAB</div>
-          <h1>JuggleWork Desktop<br /><span>远程控制诊断台</span></h1>
-          <p>验证 Cloud 登录、组织策略、Desktop 注册状态、在线心跳和能力广告。</p>
-        </div>
-        <div class="hero-status">
-          <div class="pulse" id="cloudPulse"></div>
-          <div>
-            <strong id="cloudLabel">等待检测</strong>
-            <small id="cloudDetail">https://work.juggle.im</small>
-          </div>
-        </div>
-      </header>
 
-      <section class="notice warning" id="scopeNotice">
-        <div class="notice-icon">!</div>
-        <div>
-          <strong>当前测试范围</strong>
-           <p>选定会话使用一个短期 scoped control session，通过持久化 command、可恢复 SSE 增量事件和有界轮询兜底保持同步。重同步期间保留 transcript 并暂停不安全操作。</p>
-          <p>设备身份指纹可通过独立渠道比对；此页面无法抵御 Cloud 主动投递恶意 JavaScript。</p>
-        </div>
-        <button class="ghost notification-button" id="notificationButton" type="button">启用安全通知</button>
-      </section>
+    <main id="mainContent">
+      <section class="view login-view" id="loginView" aria-labelledby="loginTitle">
+        <div class="login-card">
+          <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+          <div class="login-heading">
+            <div class="eyebrow">JUGGLEWORK CONTROL</div>
+            <h1 id="loginTitle">连接你的 Desktop</h1>
+            <p>使用 JuggleWork Cloud 账户登录，查看已注册设备。</p>
+          </div>
 
-      <div class="grid top-grid">
-        <section class="card connection-card">
-          <div class="card-heading">
-            <div>
-              <span class="step">01</span>
-              <h2>Cloud 连接</h2>
-            </div>
-            <button class="ghost" id="healthButton" type="button">重新检测</button>
-          </div>
-          <label>
-            <span>Server 地址</span>
-            <input id="baseUrl" type="url" value="https://work.juggle.im" spellcheck="false" />
-          </label>
-          <div class="metrics compact" id="cloudMetrics">
-            <div><span>Ready</span><strong>—</strong></div>
-            <div><span>CORS</span><strong>—</strong></div>
-            <div><span>WSS 路由</span><strong>—</strong></div>
-          </div>
-        </section>
-
-        <section class="card auth-card">
-          <div class="card-heading">
-            <div>
-              <span class="step">02</span>
-              <h2>账户登录</h2>
-            </div>
-            <span class="badge neutral" id="authBadge">未登录</span>
-          </div>
           <form id="loginForm" autocomplete="off">
             <div class="segmented" role="group" aria-label="登录方式">
               <button type="button" class="active" data-login-mode="account">账号</button>
@@ -75,149 +34,208 @@
             </label>
             <label>
               <span>密码</span>
-              <input id="password" required type="password" autocomplete="current-password" placeholder="仅用于本次登录" />
+              <input id="password" required type="password" autocomplete="current-password" placeholder="输入密码" />
             </label>
-            <div class="button-row">
-              <button class="primary" id="loginButton" type="submit">登录并加载设备</button>
-              <button class="ghost hidden" id="logoutButton" type="button">退出</button>
-            </div>
+            <button class="primary login-submit" id="loginButton" type="submit">
+              <span>登录</span><span aria-hidden="true">→</span>
+            </button>
           </form>
-          <p class="security-note">Session token 仅保存在此页面内存，不写入浏览器存储。</p>
-        </section>
-      </div>
 
-      <div class="grid main-grid">
-        <section class="card policy-card">
-          <div class="card-heading">
-            <div>
-              <span class="step">03</span>
-              <h2>组织与策略</h2>
-            </div>
-            <button class="ghost" id="refreshPolicyButton" type="button" disabled>刷新</button>
+          <div class="login-meta">
+            <span class="status-dot" id="loginCloudDot"></span>
+            <span id="loginCloudStatus">正在检测 Cloud</span>
+            <span aria-hidden="true">·</span>
+            <span>凭证仅用于本次登录</span>
           </div>
-          <label>
-            <span>活动组织</span>
-            <select id="organization" disabled>
-              <option value="">登录后加载</option>
-            </select>
-          </label>
-          <div class="policy-version">
-            <span>策略版本</span>
-            <code id="policyVersion">—</code>
-          </div>
-          <div class="gate-list" id="gateList"></div>
-        </section>
-
-        <section class="card devices-card">
-          <div class="card-heading">
-            <div>
-              <span class="step">04</span>
-              <h2>Desktop 设备</h2>
-            </div>
-            <div class="heading-actions">
-              <label class="auto-refresh"><input id="autoRefresh" type="checkbox" checked /> 自动刷新</label>
-              <button class="ghost" id="refreshDevicesButton" type="button" disabled>刷新</button>
-            </div>
-          </div>
-          <div class="device-list" id="deviceList">
-            <div class="empty-state">
-              <div class="radar"></div>
-              <strong>等待账户登录</strong>
-              <span>登录后将显示当前组织可访问的 Desktop</span>
-            </div>
-          </div>
-        </section>
-      </div>
-
-      <section class="card control-card">
-        <div class="card-heading">
-          <div>
-            <span class="step">05</span>
-            <h2>控制链路就绪度</h2>
-          </div>
-          <span class="badge neutral" id="controlBadge">不可用</span>
-        </div>
-        <div class="readiness" id="readiness"></div>
-        <div class="command-panel">
-          <div class="command-copy">
-            <strong>Read-only Smoke Test</strong>
-            <p>Discovery 使用一次性 session；选定 workspace/session 后复用一个最小 scope control session 执行快照、prompt、abort 和交互命令。</p>
-          </div>
-          <div class="command-buttons">
-            <button type="button" disabled data-operation="workspace.list">workspace.list</button>
-            <button type="button" disabled data-operation="session.list">session.list</button>
-            <button type="button" disabled data-operation="session.create" class="create-btn">session.create</button>
-            <button type="button" disabled data-operation="session.snapshot">session.snapshot</button>
-            <button type="button" disabled data-operation="session.prompt" class="prompt-btn">session.prompt</button>
-            <button type="button" disabled data-operation="session.abort" class="abort-btn">session.abort</button>
-          </div>
-        </div>
-        <form class="create-session-panel hidden" id="createSessionForm">
-          <label>
-            <span>New empty session title</span>
-            <input id="sessionTitleInput" aria-describedby="sessionTitleLimit createSessionGuidance" placeholder="Title only; prompt is sent separately" />
-            <small id="sessionTitleLimit">Maximum 120 Unicode code points. Control characters are not allowed.</small>
-          </label>
-          <div class="button-row">
-            <button class="primary" id="createSessionButton" type="submit" disabled>Create empty session</button>
-            <button class="ghost" id="cancelCreateSessionButton" type="button">Cancel</button>
-          </div>
-          <p class="mutation-guidance hidden" id="createSessionGuidance" role="status"></p>
-        </form>
-        <div class="control-session-status hidden" id="controlSessionStatus" role="status">
-          <div>
-            <strong id="controlSessionStatusTitle">Control session active</strong>
-            <span id="controlSessionStatusDetail"></span>
-          </div>
-          <button class="ghost hidden" id="renewControlSessionButton" type="button">Renew session</button>
-        </div>
-        <div class="prompt-panel hidden" id="promptPanel">
-          <label>
-            <span>Prompt</span>
-            <textarea id="promptInput" rows="3" placeholder="输入要发送到 Desktop 的 prompt"></textarea>
-          </label>
-          <label>
-            <span>会话忙碌时</span>
-            <select id="whenBusySelect">
-              <option value="reject">拒绝（默认）</option>
-              <option value="steer">Steer 当前运行</option>
-              <option value="enqueue">本机持久排队</option>
-            </select>
-          </label>
-          <div class="button-row">
-            <button class="primary" id="sendPromptButton" type="button" disabled>发送 Prompt</button>
-            <button class="ghost" id="cancelPromptButton" type="button">取消</button>
-          </div>
-          <div class="mutation-guidance hidden" id="pendingOperationStatus" role="status"></div>
-        </div>
-        <div class="remote-browser" id="remoteBrowser">
-          <div class="browser-pane">
-            <div class="browser-pane-heading"><strong>Workspaces</strong><span id="workspaceCount">0</span></div>
-            <div class="browser-list" id="workspaceList"><div class="browser-empty">选择在线 Desktop 后读取工作区</div></div>
-          </div>
-          <div class="browser-pane">
-            <div class="browser-pane-heading"><strong>Sessions</strong><span id="sessionCount">0</span></div>
-            <div class="browser-list" id="sessionList"><div class="browser-empty">选择工作区后读取会话</div></div>
-          </div>
-          <div class="browser-pane transcript-pane">
-            <div class="browser-pane-heading"><strong>Session snapshot</strong><span id="snapshotStatus">—</span></div>
-            <div class="snapshot" id="snapshot"><div class="browser-empty">选择会话后读取只读快照</div></div>
-          </div>
+          <span class="badge neutral hidden" id="authBadge">未登录</span>
         </div>
       </section>
 
-      <section class="card log-card">
-        <div class="card-heading">
-          <div>
-            <span class="step">06</span>
-            <h2>诊断日志</h2>
+      <section class="view device-view hidden" id="deviceView" aria-labelledby="devicePageTitle">
+        <div class="page-shell device-shell">
+          <header class="page-header">
+            <div class="wordmark"><span class="wordmark-symbol" aria-hidden="true">J</span> JuggleWork</div>
+            <button class="account-button" id="deviceLogoutButton" type="button">退出登录</button>
+          </header>
+
+          <div class="page-intro">
+            <div>
+              <div class="eyebrow">DESKTOP FLEET</div>
+              <h1 id="devicePageTitle">选择一台 Desktop</h1>
+              <p>在线设备可以建立控制链路；离线设备仅展示最近一次连接信息。</p>
+            </div>
+            <div class="device-toolbar">
+              <label class="auto-refresh"><input id="autoRefresh" type="checkbox" checked /> 自动刷新</label>
+              <button class="ghost" id="refreshDevicesButton" type="button" disabled>刷新设备</button>
+            </div>
           </div>
-          <div class="heading-actions">
-            <button class="ghost" id="copyReportButton" type="button">复制报告</button>
-            <button class="ghost" id="clearLogButton" type="button">清空</button>
-          </div>
+
+          <section class="device-fleet" aria-label="Desktop 设备列表">
+            <div class="fleet-summary">
+              <span><strong id="onlineDeviceCount">0</strong> 台在线</span>
+              <span id="totalDeviceCount">0 台设备</span>
+            </div>
+            <div class="device-list" id="deviceList">
+              <div class="empty-state">
+                <div class="radar"></div>
+                <strong>正在加载 Desktop</strong>
+                <span>设备上线后会显示在这里</span>
+              </div>
+            </div>
+          </section>
         </div>
-        <div class="log" id="log" role="log" aria-live="polite"></div>
+      </section>
+
+      <section class="view detail-view hidden" id="detailView" aria-labelledby="detailPageTitle">
+        <div class="page-shell detail-shell">
+          <header class="page-header detail-header">
+            <button class="back-button" id="backToDevicesButton" type="button"><span aria-hidden="true">←</span> 所有 Desktop</button>
+            <div class="detail-device-identity">
+              <span class="device-dot online"></span>
+              <div><strong id="detailPageTitle">Desktop</strong><small id="detailDeviceMeta">在线</small></div>
+            </div>
+            <button class="account-button" id="logoutButton" type="button">退出登录</button>
+          </header>
+
+          <section class="notice warning" id="scopeNotice">
+            <div class="notice-icon">!</div>
+            <div>
+              <strong>当前测试范围</strong>
+              <p>选定会话使用短期 scoped control session，通过持久化 command、可恢复 SSE 增量事件和有界轮询兜底保持同步。重同步期间保留 transcript 并暂停不安全操作。</p>
+              <p>设备身份指纹可通过独立渠道比对；此页面无法抵御 Cloud 主动投递恶意 JavaScript。</p>
+            </div>
+            <button class="ghost notification-button" id="notificationButton" type="button">启用安全通知</button>
+          </section>
+
+          <div class="detail-grid">
+            <section class="card connection-card">
+              <div class="card-heading">
+                <div>
+                  <span class="module-index">01</span>
+                  <div><span class="module-kicker">NETWORK</span><h2>Cloud 连接</h2></div>
+                </div>
+                <button class="ghost" id="healthButton" type="button">重新检测</button>
+              </div>
+              <div class="cloud-address">
+                <span class="pulse" id="cloudPulse"></span>
+                <div><strong id="cloudLabel">等待检测</strong><small id="cloudDetail">https://work.juggle.im</small></div>
+              </div>
+              <label class="server-field">
+                <span>Server 地址</span>
+                <input id="baseUrl" type="url" value="https://work.juggle.im" spellcheck="false" />
+              </label>
+              <div class="metrics compact" id="cloudMetrics">
+                <div><span>Ready</span><strong>—</strong></div>
+                <div><span>CORS</span><strong>—</strong></div>
+                <div><span>WSS 路由</span><strong>—</strong></div>
+              </div>
+            </section>
+
+            <section class="card policy-card">
+              <div class="card-heading">
+                <div>
+                  <span class="module-index">02</span>
+                  <div><span class="module-kicker">ACCESS</span><h2>组织与策略</h2></div>
+                </div>
+                <button class="ghost" id="refreshPolicyButton" type="button" disabled>刷新</button>
+              </div>
+              <label>
+                <span>活动组织</span>
+                <select id="organization" disabled><option value="">登录后加载</option></select>
+              </label>
+              <div class="policy-version">
+                <span>策略版本</span>
+                <code id="policyVersion">—</code>
+              </div>
+              <div class="gate-list" id="gateList"></div>
+            </section>
+          </div>
+
+          <section class="card control-card">
+            <div class="card-heading">
+              <div>
+                <span class="module-index">03</span>
+                <div><span class="module-kicker">CONTROL PLANE</span><h2>控制链路就绪度</h2></div>
+              </div>
+              <span class="badge neutral" id="controlBadge">不可用</span>
+            </div>
+            <div class="readiness" id="readiness"></div>
+            <div class="command-panel">
+              <div class="command-copy">
+                <strong>Read-only smoke test</strong>
+                <p>Discovery 使用一次性 session；选定 workspace/session 后复用一个最小 scope control session。</p>
+              </div>
+              <div class="command-buttons">
+                <button type="button" disabled data-operation="workspace.list">workspace.list</button>
+                <button type="button" disabled data-operation="session.list">session.list</button>
+                <button type="button" disabled data-operation="session.create" class="create-btn">session.create</button>
+                <button type="button" disabled data-operation="session.snapshot">session.snapshot</button>
+                <button type="button" disabled data-operation="session.prompt" class="prompt-btn">session.prompt</button>
+                <button type="button" disabled data-operation="session.abort" class="abort-btn">session.abort</button>
+              </div>
+            </div>
+            <form class="create-session-panel hidden" id="createSessionForm">
+              <label>
+                <span>New empty session title</span>
+                <input id="sessionTitleInput" aria-describedby="sessionTitleLimit createSessionGuidance" placeholder="Title only; prompt is sent separately" />
+                <small id="sessionTitleLimit">Maximum 120 Unicode code points. Control characters are not allowed.</small>
+              </label>
+              <div class="button-row">
+                <button class="primary" id="createSessionButton" type="submit" disabled>Create empty session</button>
+                <button class="ghost" id="cancelCreateSessionButton" type="button">Cancel</button>
+              </div>
+              <p class="mutation-guidance hidden" id="createSessionGuidance" role="status"></p>
+            </form>
+            <div class="control-session-status hidden" id="controlSessionStatus" role="status">
+              <div><strong id="controlSessionStatusTitle">Control session active</strong><span id="controlSessionStatusDetail"></span></div>
+              <button class="ghost hidden" id="renewControlSessionButton" type="button">Renew session</button>
+            </div>
+            <div class="prompt-panel hidden" id="promptPanel">
+              <label><span>Prompt</span><textarea id="promptInput" rows="3" placeholder="输入要发送到 Desktop 的 prompt"></textarea></label>
+              <label>
+                <span>会话忙碌时</span>
+                <select id="whenBusySelect">
+                  <option value="reject">拒绝（默认）</option>
+                  <option value="steer">Steer 当前运行</option>
+                  <option value="enqueue">本机持久排队</option>
+                </select>
+              </label>
+              <div class="button-row">
+                <button class="primary" id="sendPromptButton" type="button" disabled>发送 Prompt</button>
+                <button class="ghost" id="cancelPromptButton" type="button">取消</button>
+              </div>
+              <div class="mutation-guidance hidden" id="pendingOperationStatus" role="status"></div>
+            </div>
+            <div class="remote-browser" id="remoteBrowser">
+              <div class="browser-pane">
+                <div class="browser-pane-heading"><strong>Workspaces</strong><span id="workspaceCount">0</span></div>
+                <div class="browser-list" id="workspaceList"><div class="browser-empty">读取当前 Desktop 的工作区</div></div>
+              </div>
+              <div class="browser-pane">
+                <div class="browser-pane-heading"><strong>Sessions</strong><span id="sessionCount">0</span></div>
+                <div class="browser-list" id="sessionList"><div class="browser-empty">选择工作区后读取会话</div></div>
+              </div>
+              <div class="browser-pane transcript-pane">
+                <div class="browser-pane-heading"><strong>Session snapshot</strong><span id="snapshotStatus">—</span></div>
+                <div class="snapshot" id="snapshot"><div class="browser-empty">选择会话后读取只读快照</div></div>
+              </div>
+            </div>
+          </section>
+
+          <section class="card log-card">
+            <div class="card-heading">
+              <div>
+                <span class="module-index">04</span>
+                <div><span class="module-kicker">OBSERVABILITY</span><h2>诊断日志</h2></div>
+              </div>
+              <div class="heading-actions">
+                <button class="ghost" id="copyReportButton" type="button">复制报告</button>
+                <button class="ghost" id="clearLogButton" type="button">清空</button>
+              </div>
+            </div>
+            <div class="log" id="log" role="log" aria-live="polite"></div>
+          </section>
+        </div>
       </section>
     </main>
     <div class="toast" id="toast" role="status"></div>
